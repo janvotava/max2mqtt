@@ -12,6 +12,7 @@
 #include <SPI.h>
 #include "MaxCC1101.h"
 #include <ESP8266WiFi.h>
+#include <ESP8266WiFiMulti.h>
 #include <ArduinoJson.h>
 #include <ArduinoOTA.h>
 #include <DNSServer.h>
@@ -64,6 +65,8 @@ void stopBurner()
 #endif
 }
 
+ESP8266WiFiMulti wifiMulti;
+
 void setup_wifi()
 {
   delay(10);
@@ -73,7 +76,7 @@ void setup_wifi()
   Serial.println(WIFI_SSID);
 
   WiFi.softAPdisconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  wifiMulti.addAP(WIFI_SSID, WIFI_PASSWORD);
   WiFi.hostname(HOSTNAME);
 
   randomSeed(micros());
@@ -1009,6 +1012,7 @@ void publishState()
 
 void loop(void)
 {
+  wifiMulti.run();
   static unsigned long last_credited_at = millis();
   ArduinoOTA.handle();
   yield();
