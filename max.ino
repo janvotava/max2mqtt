@@ -1021,6 +1021,11 @@ void loop(void)
   ArduinoOTA.handle();
   yield();
 
+  if (millis() > 10 * 24 * 60 * 60 * 1000) {
+    Debug.println("******** Restarting after 10 days!");
+    ESP.restart();
+  }
+
   if (WiFi.status() == WL_CONNECTED)
   {
     syncTime();
