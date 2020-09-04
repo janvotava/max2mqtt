@@ -865,7 +865,9 @@ void rfinit()
 {
   lastCommand = millis();
   rf.init();
+  Serial.println("Init receive!");
   rf.initReceive();
+  Serial.println("Done");
 }
 
 void setup(void)
