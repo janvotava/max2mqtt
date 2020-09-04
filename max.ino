@@ -870,6 +870,11 @@ void rfinit()
   Serial.println("Done");
 }
 
+void ICACHE_RAM_ATTR messageReceivedInterrupt()
+{
+  checkForNewPacket();
+}
+
 void setup(void)
 {
   Serial.begin(115200);
@@ -893,14 +898,11 @@ void setup(void)
   client.setServer(MQTT_SERVER, 1883);
   client.setCallback(callback);
 
+  Serial.println("RF Init");
   rfinit();
+  Serial.println("RF Init done");
   pinMode(CC1101_IRQ_PIN, INPUT);
   attachInterrupt(CC1101_IRQ_PIN, messageReceivedInterrupt, RISING);
-}
-
-void messageReceivedInterrupt()
-{
-  checkForNewPacket();
 }
 
 #define RUN 1
