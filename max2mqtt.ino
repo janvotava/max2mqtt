@@ -1721,7 +1721,7 @@ void handle(CC1101Packet *packet)
     setType(device, DEVICE_WALL_THERMOSTAT);
 
     float desiredTemperature = (getByte(packet, 11) & 0x7F) / 2.0;
-    float measuredTemperature = (((getByte(packet, 11) & 0x01) << 8) + getByte(packet, 12)) / 10.0;
+    float measuredTemperature = (((getByte(packet, 11) & 0x80) << 1) + getByte(packet, 12)) / 10.0;
     device->desired_temperature = desiredTemperature;
     device->desired_temperature_timestamp = millis();
     device->measured_temperature = measuredTemperature;
