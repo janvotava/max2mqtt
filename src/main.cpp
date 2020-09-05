@@ -9,7 +9,9 @@
   8 - CSN        15=D8      Chip select / (SPI_SS)
 */
 
+#include "Arduino.h"
 #include <SPI.h>
+// #include "MaxCC1101.h"
 #include "MaxCC1101.h"
 #include <ESP8266WiFi.h>
 #include <ESP8266WiFiMulti.h>
@@ -17,14 +19,18 @@
 #include <ArduinoOTA.h>
 #include <DNSServer.h>
 #include <ESP8266mDNS.h>
-#include "src/lib/PubSubClient/src/PubSubClient.h"
+#include <PubSubClient.h>
 #include <vector>
 #include <queue>
 #include "max.h"
 #include "state.h"
 #include "message.h"
-#include "src/lib/Time/TimeLib.h"
+#include <TimeLib.h>
 #include "configuration.h"
+#include "time.hpp"
+#include "mqtt.hpp"
+#include "config.hpp"
+#include "main.hpp"
 
 #if TELNET_DEBUGGER
 #include "RemoteDebug.h"
@@ -32,6 +38,8 @@
 
 WiFiClient espClient;
 PubSubClient client(espClient);
+// client = PubSubClient(espClient);
+// client(espClient);
 
 MaxCC1101 rf;
 
@@ -47,9 +55,19 @@ const int capacity PROGMEM = JSON_OBJECT_SIZE(10) + 256;
 
 bool pairing_enabled = false;
 bool autocreate = true;
+// extern bool autocreate = true;
 unsigned int last_config_changed = millis();
 bool config_changed = false;
 bool published_started_at_state = false;
+
+bool furnace_running = false;
+char boot_time[20];
+
+byte myAddress[3] = {0x12, 0x34, 0x56};
+std::vector<state> states;
+std::queue<Message> queue;
+std::queue<CC1101Packet> received_messages;
+
 
 void startBurner()
 {
@@ -95,11 +113,6 @@ void setup_wifi()
   MDNS.addService("telnet", "tcp", 23); // Telnet server RemoteDebug
 #endif
 }
-
-byte myAddress[3] = {0x12, 0x34, 0x56};
-std::vector<state> states;
-std::queue<Message> queue;
-std::queue<CC1101Packet> received_messages;
 
 #ifdef CREDIT_15MIN
 unsigned long creditMs = CREDIT_15MIN;
@@ -511,6 +524,28 @@ void addAssociation(state *device, byte *address)
   }
 }
 
+void addLinkPartner(byte *address, byte *to, byte type)
+{
+  CC1101Packet outMessage;
+  outMessage.data[0] = 14; // Length
+  outMessage.data[1] = msgCounter++;
+  outMessage.data[2] = 0; //msgflag
+  outMessage.data[3] = ADD_LINK_PARTNER_CMD;
+  for (int i = 0; i < 3; ++i)
+    outMessage.data[4 + i] = myAddress[i];
+  for (int i = 0; i < 3; ++i)
+    outMessage.data[7 + i] = address[i];
+  outMessage.data[10] = 0; // GroupId
+  for (int i = 0; i < 3; ++i)
+    outMessage.data[11 + i] = to[i];
+  outMessage.data[14] = type;
+  outMessage.length = 15;
+
+  Debug.printf("Asociating to link partner type %i\n", type);
+
+  addToQueue(outMessage, true, true);
+}
+
 void sendAssociateBetween(state *device, state *toDevice)
 {
   if (toDevice->type != UNDEFINED)
@@ -577,6 +612,15 @@ void setTemperatureSettings(state *device, float comfort, float eco, float max, 
   Debug.println(eco);
 
   addToQueue(outMessage, true, true);
+}
+
+void setDisplayActualTemperatureState(state *device, bool display_actual_temperature)
+{
+  if (display_actual_temperature != device->display_actual_temperature)
+  {
+    config_changed = true;
+  }
+  device->display_actual_temperature = display_actual_temperature;
 }
 
 void configValveFunctions(state *device, byte decalc_weekday = 0, byte decalc_hour = 12, byte boost_duration = 6, byte boost_valve_position = 100, byte max_valve_setting = 100, byte valve_offset = 0)
@@ -692,6 +736,36 @@ void setSelf(byte *payload)
       config_changed = true;
       publishState();
     }
+  }
+}
+
+void publishState()
+{
+  StaticJsonDocument<capacity> doc;
+  char output[128];
+  doc["availability"] = "online";
+
+  if (*boot_time == 0)
+  {
+    const time_t t = getBootTime();
+    if (t)
+    {
+      sprintf(boot_time, "%i-%02d-%02d %02d:%02d:%02d", year(t), month(t), day(t), hour(t), minute(t), second(t));
+    }
+  }
+
+  if (*boot_time != 0)
+  {
+    doc["booted_at"] = boot_time;
+  }
+  doc["pairing_enabled"] = pairing_enabled;
+  doc["autocreate"] = autocreate;
+  doc["furnace_running"] = furnace_running;
+
+  serializeJson(doc, output);
+  if (client.publish("max", output, true) && *boot_time != 0)
+  {
+    published_started_at_state = true;
   }
 }
 
@@ -981,39 +1055,6 @@ void syncTimeToDevices()
   }
 }
 
-bool furnace_running = false;
-char boot_time[20];
-
-void publishState()
-{
-  StaticJsonDocument<capacity> doc;
-  char output[128];
-  doc["availability"] = "online";
-
-  if (*boot_time == 0)
-  {
-    const time_t t = getBootTime();
-    if (t)
-    {
-      sprintf(boot_time, "%i-%02d-%02d %02d:%02d:%02d", year(t), month(t), day(t), hour(t), minute(t), second(t));
-    }
-  }
-
-  if (*boot_time != 0)
-  {
-    doc["booted_at"] = boot_time;
-  }
-  doc["pairing_enabled"] = pairing_enabled;
-  doc["autocreate"] = autocreate;
-  doc["furnace_running"] = furnace_running;
-
-  serializeJson(doc, output);
-  if (client.publish("max", output, true) && *boot_time != 0)
-  {
-    published_started_at_state = true;
-  }
-}
-
 void loop(void)
 {
   wifiMulti.run();
@@ -1239,15 +1280,6 @@ void setMode(state *device, int mode)
   device->mode_timestamp = millis();
 }
 
-void setDisplayActualTemperatureState(state *device, bool display_actual_temperature)
-{
-  if (display_actual_temperature != device->display_actual_temperature)
-  {
-    config_changed = true;
-  }
-  device->display_actual_temperature = display_actual_temperature;
-}
-
 bool compareAddress(byte *first, byte *second)
 {
   return first[0] == second[0] && first[1] == second[1] && first[2] == second[2];
@@ -1279,28 +1311,6 @@ void sendAckTo(byte *address, byte msgcnt = 0)
   Debug.println("Responding with ACK");
 
   addToQueue(outMessage, false);
-}
-
-void addLinkPartner(byte *address, byte *to, byte type)
-{
-  CC1101Packet outMessage;
-  outMessage.data[0] = 14; // Length
-  outMessage.data[1] = msgCounter++;
-  outMessage.data[2] = 0; //msgflag
-  outMessage.data[3] = ADD_LINK_PARTNER_CMD;
-  for (int i = 0; i < 3; ++i)
-    outMessage.data[4 + i] = myAddress[i];
-  for (int i = 0; i < 3; ++i)
-    outMessage.data[7 + i] = address[i];
-  outMessage.data[10] = 0; // GroupId
-  for (int i = 0; i < 3; ++i)
-    outMessage.data[11 + i] = to[i];
-  outMessage.data[14] = type;
-  outMessage.length = 15;
-
-  Debug.printf("Asociating to link partner type %i\n", type);
-
-  addToQueue(outMessage, true, true);
 }
 
 void parseDateTime(CC1101Packet *packet, short offset)

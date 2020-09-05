@@ -1,3 +1,4 @@
+#include "main.hpp"
 
 void mqttReconnect()
 {

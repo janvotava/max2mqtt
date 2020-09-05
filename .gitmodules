@@ -1,3 +1,0 @@
-[submodule "src/lib/Time"]
-	path = src/lib/Time
-	url = git@github.com:PaulStoffregen/Time.git

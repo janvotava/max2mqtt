@@ -1,0 +1,2 @@
+void mqttReconnect();
+void mqttLoop();

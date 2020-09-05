@@ -1,7 +1,8 @@
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
-#include "src/lib/Time/TimeLib.h"
-#include "src/lib/Timezone/src/Timezone.h"
+#include <TimeLib.h>
+#include <Timezone.h>
+#include "time.hpp"
 
 unsigned int localUdpPort = 2390; // local port to listen for UDP packets
 
@@ -122,20 +123,6 @@ unsigned long sendNTPpacket()
   udp.endPacket();
 }
 
-//Function to print time with time zone
-void printTime(time_t t)
-{
-  sPrintI00(hour(t));
-  sPrintDigits(minute(t));
-  sPrintDigits(second(t));
-  Serial.print(' ');
-  Serial.print(day(t));
-  Serial.print('.');
-  Serial.print(month(t));
-  Serial.print('.');
-  Serial.print(year(t));
-}
-
 //Print an integer in "00" format (with leading zero).
 //Input value assumed to be between 0 and 99.
 void sPrintI00(int val)
@@ -154,4 +141,18 @@ void sPrintDigits(int val)
   if (val < 10)
     Serial.print('0');
   Serial.print(val, DEC);
+}
+
+//Function to print time with time zone
+void printTime(time_t t)
+{
+  sPrintI00(hour(t));
+  sPrintDigits(minute(t));
+  sPrintDigits(second(t));
+  Serial.print(' ');
+  Serial.print(day(t));
+  Serial.print('.');
+  Serial.print(month(t));
+  Serial.print('.');
+  Serial.print(year(t));
 }

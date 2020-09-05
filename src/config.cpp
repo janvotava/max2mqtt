@@ -3,6 +3,7 @@
 #include <ArduinoJson.h>
 #include "state.h"
 #include "max.h"
+#include "main.hpp"
 
 const size_t CONFIG_CAPACITY PROGMEM = JSON_OBJECT_SIZE(10) + 1024;
 

@@ -21,11 +21,9 @@ CC11xx pins    ESP pins   Description
 ```bash
 git clone git@github.com:janvotava/max2mqtt.git
 cd max2mqtt
-git submodule update --init --recursive
-cp configuration_sample.h configuration.h
+cp include/configuration_sample.h include/configuration.h # And ddit configuration file
+platformio run --target upload
 ```
-
-And edit configuration file, then upload via Arduino with at least 1M spiffs.
 
 ## Configuration
 
