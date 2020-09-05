@@ -25,7 +25,6 @@
 #include "max.h"
 #include "state.h"
 #include "message.h"
-#include <TimeLib.h>
 #include "configuration.h"
 #include "time.hpp"
 #include "mqtt.hpp"
@@ -68,6 +67,7 @@ std::vector<state> states;
 std::queue<Message> queue;
 std::queue<CC1101Packet> received_messages;
 
+String bootedAt;
 
 void startBurner()
 {
@@ -744,26 +744,13 @@ void publishState()
   StaticJsonDocument<capacity> doc;
   char output[128];
   doc["availability"] = "online";
-
-  if (*boot_time == 0)
-  {
-    const time_t t = getBootTime();
-    if (t)
-    {
-      sprintf(boot_time, "%i-%02d-%02d %02d:%02d:%02d", year(t), month(t), day(t), hour(t), minute(t), second(t));
-    }
-  }
-
-  if (*boot_time != 0)
-  {
-    doc["booted_at"] = boot_time;
-  }
+  doc["booted_at"] = bootedAt;
   doc["pairing_enabled"] = pairing_enabled;
   doc["autocreate"] = autocreate;
   doc["furnace_running"] = furnace_running;
 
   serializeJson(doc, output);
-  if (client.publish("max", output, true) && *boot_time != 0)
+  if (client.publish("max", output, true))
   {
     published_started_at_state = true;
   }
@@ -968,6 +955,7 @@ void setup(void)
 
   loadConfig();
   setupTime();
+  bootedAt = String(ntp.formattedTime("%Y-%m-%d %H:%M:%S"));
 
   client.setServer(MQTT_SERVER, 1883);
   client.setCallback(callback);
@@ -987,10 +975,7 @@ int last_heating_state = STOP;
 
 bool sendCurrentTimeTo(byte *address, byte msgcnt = 0, byte group = 0, bool longPreamble = true)
 {
-  time_t t = getTime();
-
-  if (!t)
-  {
+  if (!isTimeSynced()) {
     Debug.println("Time not synced, cannot send.");
     return false;
   }
@@ -1008,23 +993,16 @@ bool sendCurrentTimeTo(byte *address, byte msgcnt = 0, byte group = 0, bool long
   outMessage.data[9] = address[2];
   outMessage.data[10] = group; // GroupId
 
-  int _year = year(t);
-  int _month = month(t);
-  int _day = day(t);
-  int _hour = hour(t);
-  int _minute = minute(t);
-  int _second = second(t);
-
-  outMessage.data[11] = _year - 2000;
-  outMessage.data[12] = _day;
-  outMessage.data[13] = _hour;
-  outMessage.data[14] = _minute | ((_month & 0x0C) << 4);
-  outMessage.data[15] = _second | ((_month & 0x03) << 6);
+  outMessage.data[11] = ntp.year() - 2000;
+  outMessage.data[12] = ntp.day();
+  outMessage.data[13] = ntp.hours();
+  outMessage.data[14] = ntp.minutes() | ((ntp.month() & 0x0C) << 4);
+  outMessage.data[15] = ntp.seconds() | ((ntp.month() & 0x03) << 6);
 
   outMessage.length = 16;
 
   Debug.print("Sending time: ");
-  printTime(t);
+  printTime();
   Debug.println();
 
   addToQueue(outMessage, longPreamble);
@@ -1061,15 +1039,11 @@ void loop(void)
   static unsigned long last_credited_at = millis();
   ArduinoOTA.handle();
   yield();
+  ntp.update();
 
   if (millis() > 10 * 24 * 60 * 60 * 1000) {
     Debug.println("******** Restarting after 10 days!");
     ESP.restart();
-  }
-
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    syncTime();
   }
 
   if (!received_messages.empty())

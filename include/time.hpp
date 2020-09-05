@@ -1,13 +1,9 @@
-#include <TimeLib.h>
+#include <NTP.h>
+
+extern NTP ntp;
 
 void setupTime();
-void sPrintI00(int val);
-void sPrintDigits(int val);
-void printTime(time_t t);
-unsigned long sendNTPpacket();
+void printTime();
 
-time_t toLocal(time_t utc);
-time_t getBootTime();
-time_t getTime();
-
-bool syncTime();
+#define TENYEARS 315360000UL
+bool isTimeSynced();
