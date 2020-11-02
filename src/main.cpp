@@ -954,7 +954,10 @@ void setup(void)
   stopBurner();
 
   loadConfig();
+
+  Serial.println("Setting up time...");
   setupTime();
+  Serial.println("Finished.");
   bootedAt = String(ntp.formattedTime("%Y-%m-%d %H:%M:%S"));
 
   client.setServer(MQTT_SERVER, 1883);
