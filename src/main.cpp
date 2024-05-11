@@ -31,10 +31,6 @@
 #include "config.hpp"
 #include "main.hpp"
 
-#if TELNET_DEBUGGER
-#include "RemoteDebug.h"
-#endif
-
 WiFiClient espClient;
 PubSubClient client(espClient);
 // client = PubSubClient(espClient);
@@ -44,11 +40,7 @@ MaxCC1101 rf;
 
 byte msgCounter = 0;
 
-#if TELNET_DEBUGGER
-RemoteDebug Debug;
-#else
 #define Debug Serial
-#endif
 
 const int capacity PROGMEM = JSON_OBJECT_SIZE(10) + 256;
 
@@ -109,9 +101,6 @@ void setup_wifi()
     Serial.print("* MDNS responder started. Hostname -> ");
     Serial.println(HOSTNAME);
   }
-#if TELNET_DEBUGGER
-  MDNS.addService("telnet", "tcp", 23); // Telnet server RemoteDebug
-#endif
 }
 
 #ifdef CREDIT_15MIN
@@ -943,11 +932,6 @@ void setup(void)
   setup_wifi();
   ArduinoOTA.begin();
 
-#if TELNET_DEBUGGER
-  Debug.begin("max", Debug.DEBUG);
-  Debug.setSerialEnabled(true);
-#endif
-
 #ifdef BURNER_RELAY_PIN
   pinMode(BURNER_RELAY_PIN, OUTPUT);
 #endif
@@ -1122,10 +1106,6 @@ void loop(void)
     Debug.println("We're not getting messages, trying to reinit.");
     client.publish("max/init", "RF init");
   }
-
-#if TELNET_DEBUGGER
-  Debug.handle();
-#endif
 }
 
 void bytesToString(char *buffer, byte *data, int length)

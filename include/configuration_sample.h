@@ -6,5 +6,4 @@
 // Advanced
 #define BURNER_RELAY_PIN D1
 #define CC1101_IRQ_PIN D2
-#define TELNET_DEBUGGER false
 #define CREDIT_15MIN 36 / 4 * 1000 // We can communicate 36s per hour, split to 9s chunks per 15 minutes

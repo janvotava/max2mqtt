@@ -65,8 +65,4 @@ extern byte myAddress[3];
 extern WiFiClient espClient;
 extern PubSubClient client;
 
-#if TELNET_DEBUGGER
-RemoteDebug Debug;
-#else
 #define Debug Serial
-#endif
