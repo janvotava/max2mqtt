@@ -262,4 +262,6 @@ bool saveConfig()
     yield();
     configFile.close();
   }
+
+  return true;
 }

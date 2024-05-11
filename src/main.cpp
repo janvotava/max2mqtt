@@ -1170,26 +1170,18 @@ void getBytes(byte (&arr)[N], CC1101Packet *packet, unsigned int position)
 
 #define bitCopy(from, to, bit) (bitWrite(to, bit, bitRead(from, bit)))
 
-String modeToString(int mode)
-{
-  switch (mode)
-  {
-  case MODE_AUTO:
-  {
-    return "auto";
-  }
-  case MODE_MANUAL:
-  {
-    return "manual";
-  }
-  case MODE_TEMPORARY:
-  {
-    return "temporary";
-  }
-  case MODE_BOOST:
-  {
-    return "boost";
-  }
+String modeToString(int mode) {
+  switch (mode) {
+    case MODE_AUTO:
+      return "auto";
+    case MODE_MANUAL:
+      return "manual";
+    case MODE_TEMPORARY:
+      return "temporary";
+    case MODE_BOOST:
+      return "boost";
+    default:
+      return "unknown";
   }
 }
 
@@ -1218,21 +1210,15 @@ String typeToString(int type)
   switch (type)
   {
   case DEVICE_CUBE:
-  {
     return "cube";
-  }
   case DEVICE_HEATING_THERMOSTAT:
-  {
     return "heater";
-  }
   case DEVICE_WALL_THERMOSTAT:
-  {
     return "thermostat";
-  }
   case DEVICE_SHUTTER_CONTACT:
-  {
     return "shutter_contact";
-  }
+  default:
+    return "unknown";
   }
 }
 
