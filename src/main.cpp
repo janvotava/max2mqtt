@@ -61,6 +61,8 @@ std::queue<CC1101Packet> received_messages;
 
 String bootedAt;
 
+const byte BROADCAST_ADDRESS[3] = {0x12, 0x34, 0x56};
+
 void startBurner()
 {
 #ifdef BURNER_RELAY_PIN
@@ -1223,7 +1225,7 @@ void setMode(state *device, int mode)
   device->mode_timestamp = millis();
 }
 
-bool compareAddress(byte *first, byte *second)
+bool compareAddress(byte *first, const byte *second)
 {
   return first[0] == second[0] && first[1] == second[1] && first[2] == second[2];
 }
@@ -1741,7 +1743,7 @@ void handle(CC1101Packet *packet)
   case PAIR_PING_CMD:
   {
     Debug.print("Pair ping request");
-    if (isToMyself || (pairing_enabled && isEmptyAddress(dst)))
+    if (isToMyself || (pairing_enabled && (isEmptyAddress(dst) || compareAddress(dst, BROADCAST_ADDRESS))))
     {
       Debug.print(", is to myself");
       CC1101Packet outMessage;
