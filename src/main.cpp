@@ -368,7 +368,7 @@ void setDesiredTemperature(state *device, int mode, float temperature)
   CC1101Packet outMessage;
   outMessage.data[0] = 11; // Length
   outMessage.data[1] = msgCounter++;
-  outMessage.data[2] = device->group == 0 ? 0 : 4; //msgflag - 0, when groupid present 04
+  outMessage.data[2] = device->group == 0 ? 0 : 4; // msgflag - 0, when groupid present 04
   outMessage.data[3] = SET_TEMPERATURE_CMD;
 
   for (int i = 0; i < 3; ++i) /* src = enc_dst*/
@@ -424,7 +424,7 @@ void sendScheduleTo(state *device, byte weekDay, byte *schedule, byte size)
   CC1101Packet outMessage;
   outMessage.data[0] = 11 + size; // Length
   outMessage.data[1] = msgCounter++;
-  outMessage.data[2] = device->group == 0 ? 0 : 4; //msgflag - 0, when groupid present 04
+  outMessage.data[2] = device->group == 0 ? 0 : 4; // msgflag - 0, when groupid present 04
   outMessage.data[3] = CONFIG_WEEK_PROFILE_CMD;
 
   for (int i = 0; i < 3; ++i)
@@ -518,7 +518,7 @@ void addLinkPartner(byte *address, byte *to, byte type)
   CC1101Packet outMessage;
   outMessage.data[0] = 14; // Length
   outMessage.data[1] = msgCounter++;
-  outMessage.data[2] = 0; //msgflag
+  outMessage.data[2] = 0; // msgflag
   outMessage.data[3] = ADD_LINK_PARTNER_CMD;
   for (int i = 0; i < 3; ++i)
     outMessage.data[4 + i] = myAddress[i];
@@ -581,7 +581,7 @@ void setTemperatureSettings(state *device, float comfort, float eco, float max, 
   CC1101Packet outMessage;
   outMessage.data[0] = 17; // Length
   outMessage.data[1] = msgCounter++;
-  outMessage.data[2] = 0; //msgflag
+  outMessage.data[2] = 0; // msgflag
   outMessage.data[3] = CONFIG_TEMPERATURES_CMD;
   for (int i = 0; i < 3; ++i)
     outMessage.data[4 + i] = myAddress[i];
@@ -635,7 +635,7 @@ void configValveFunctions(state *device, byte decalc_weekday = 0, byte decalc_ho
   CC1101Packet outMessage;
   outMessage.data[0] = 14; // Length
   outMessage.data[1] = msgCounter++;
-  outMessage.data[2] = 0; //msgflag
+  outMessage.data[2] = 0; // msgflag
   outMessage.data[3] = CONFIG_VALVE_CMD;
   for (int i = 0; i < 3; ++i)
     outMessage.data[4 + i] = myAddress[i];
@@ -659,7 +659,7 @@ void displayActualTemperature(state *device, bool isEnabled)
   CC1101Packet outMessage;
   outMessage.data[0] = 11; // Length
   outMessage.data[1] = msgCounter++;
-  outMessage.data[2] = 0; //msgflag
+  outMessage.data[2] = 0; // msgflag
   outMessage.data[3] = SET_DISPLAY_ACTUAL_TEMPERATURE_CMD;
   for (int i = 0; i < 3; ++i)
     outMessage.data[4 + i] = myAddress[i];
@@ -962,7 +962,8 @@ int last_heating_state = STOP;
 
 bool sendCurrentTimeTo(byte *address, byte msgcnt = 0, byte group = 0, bool longPreamble = true)
 {
-  if (!isTimeSynced()) {
+  if (!isTimeSynced())
+  {
     Debug.println("Time not synced, cannot send.");
     return false;
   }
@@ -970,7 +971,7 @@ bool sendCurrentTimeTo(byte *address, byte msgcnt = 0, byte group = 0, bool long
   CC1101Packet outMessage;
   outMessage.data[0] = 0x0F; // Length
   outMessage.data[1] = msgcnt;
-  outMessage.data[2] = 0x04; //msgflag
+  outMessage.data[2] = 0x04; // msgflag
   outMessage.data[3] = TIME_INFORMATION_CMD;
   outMessage.data[4] = myAddress[0];
   outMessage.data[5] = myAddress[1];
@@ -1028,7 +1029,8 @@ void loop(void)
   yield();
   ntp.update();
 
-  if (millis() > 10 * 24 * 60 * 60 * 1000) {
+  if (millis() > 10 * 24 * 60 * 60 * 1000)
+  {
     Debug.println("******** Restarting after 10 days!");
     ESP.restart();
   }
@@ -1150,18 +1152,20 @@ void getBytes(byte (&arr)[N], CC1101Packet *packet, unsigned int position)
 
 #define bitCopy(from, to, bit) (bitWrite(to, bit, bitRead(from, bit)))
 
-String modeToString(int mode) {
-  switch (mode) {
-    case MODE_AUTO:
-      return "auto";
-    case MODE_MANUAL:
-      return "manual";
-    case MODE_TEMPORARY:
-      return "temporary";
-    case MODE_BOOST:
-      return "boost";
-    default:
-      return "unknown";
+String modeToString(int mode)
+{
+  switch (mode)
+  {
+  case MODE_AUTO:
+    return "auto";
+  case MODE_MANUAL:
+    return "manual";
+  case MODE_TEMPORARY:
+    return "temporary";
+  case MODE_BOOST:
+    return "boost";
+  default:
+    return "unknown";
   }
 }
 
@@ -1239,7 +1243,7 @@ void sendAckTo(byte *address, byte msgcnt = 0)
   CC1101Packet outMessage;
   outMessage.data[0] = 11; // Length
   outMessage.data[1] = msgcnt;
-  outMessage.data[2] = 0; //msgflag
+  outMessage.data[2] = 0; // msgflag
   outMessage.data[3] = ACK_CMD;
 
   for (int i = 0; i < 3; ++i) /* src = enc_dst*/
@@ -1742,7 +1746,7 @@ void handle(CC1101Packet *packet)
       CC1101Packet outMessage;
       outMessage.data[0] = 11; // Length
       outMessage.data[1] = msgcnt;
-      outMessage.data[2] = 0x0; //msgflag
+      outMessage.data[2] = 0x0; // msgflag
       outMessage.data[3] = PAIR_PONG_CMD;
       outMessage.data[4] = myAddress[0];
       outMessage.data[5] = myAddress[1];
@@ -1751,7 +1755,7 @@ void handle(CC1101Packet *packet)
       outMessage.data[8] = src[1];
       outMessage.data[9] = src[2];
       outMessage.data[10] = group; // GroupId
-      outMessage.data[11] = 0x00;  //Payload
+      outMessage.data[11] = 0x00;  // Payload
       outMessage.length = 12;
       Debug.println(", responding with PairPong.");
       addToQueue(outMessage, false);
