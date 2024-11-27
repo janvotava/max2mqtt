@@ -895,7 +895,7 @@ void callback(String topic, byte *payload, unsigned int length)
 void subscribeToDeviceSetTopics()
 {
   state *device;
-  for (int i; i < states.size(); i++)
+  for (size_t i = 0; i < states.size(); i++)
   {
     device = &states[i];
     if (device->name != "")
@@ -1005,7 +1005,7 @@ void syncTimeToDevices()
   last_time_sync_to_devices = millis();
   state *device;
   Debug.printf("Syncing time to chunk number %i\n", time_sync_device_chunk);
-  for (int i; i < states.size(); i++)
+  for (size_t i = 0; i < states.size(); i++)
   {
     device = &states[i];
     if (i % TIME_SYNC_CHUNKS == time_sync_device_chunk && (device->type == DEVICE_HEATING_THERMOSTAT || device->type == DEVICE_WALL_THERMOSTAT))
