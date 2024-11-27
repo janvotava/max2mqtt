@@ -898,14 +898,18 @@ void subscribeToDeviceSetTopics()
   for (size_t i = 0; i < states.size(); i++)
   {
     device = &states[i];
-    if (device->name != "")
+
+    if (device->name == "")
     {
-      String topic = "max/";
-      topic += device->name;
-      topic += "/set";
-      Serial.printf("Subscribing to: %s\n", topic.c_str());
-      client.subscribe(topic.c_str(), 1);
+      Serial.printf("Skipping device %i with empty name\n", i);
+      continue;
     }
+
+    String topic = "max/";
+    topic += device->name;
+    topic += "/set";
+    Serial.printf("Subscribing to: %s\n", topic.c_str());
+    client.subscribe(topic.c_str(), 1);
   }
 }
 

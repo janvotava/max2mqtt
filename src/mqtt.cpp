@@ -20,6 +20,7 @@ void mqttReconnect()
       client.subscribe("max/reset", 1);
       client.subscribe("max/set", 1);
 
+      Serial.println("Subscribing to device set topics");
       subscribeToDeviceSetTopics();
     }
     else
