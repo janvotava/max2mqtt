@@ -61,8 +61,6 @@ std::queue<CC1101Packet> received_messages;
 
 String bootedAt;
 
-const byte BROADCAST_ADDRESS[3] = {0x12, 0x34, 0x56};
-
 void startBurner()
 {
 #ifdef BURNER_RELAY_PIN
@@ -1419,11 +1417,6 @@ int isHeatingNeeded()
   return result;
 }
 
-bool isEmptyAddress(byte *address)
-{
-  return address[0] == 0 && address[1] == 0 && address[2] == 0;
-}
-
 void sendConfigurationTo(state *device)
 {
   Debug.printf("Restoring configuration for %s after factory reset.\n", device->name.c_str());
@@ -1743,7 +1736,7 @@ void handle(CC1101Packet *packet)
   case PAIR_PING_CMD:
   {
     Debug.print("Pair ping request");
-    if (isToMyself || (pairing_enabled && (isEmptyAddress(dst) || compareAddress(dst, BROADCAST_ADDRESS))))
+    if (isToMyself || pairing_enabled)
     {
       Debug.print(", is to myself");
       CC1101Packet outMessage;
