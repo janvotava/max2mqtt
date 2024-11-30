@@ -43,5 +43,12 @@ typedef struct
   byte schedule_size[7];
 
   std::vector<byte> associated_devices;
+
+  float tpi_integral = 0.0;
+  unsigned long tpi_last_calculation = 0;
+  float tpi_output = 0.0;
+  float quiet_mode_offset = 0.0; // Offset for quiet mode so that furnace will stop before valves start making noise
+  float error_15min_ago = 0.0;
+  unsigned long error_15min_timestamp = 0;
 } state;
 #endif

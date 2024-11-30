@@ -11,7 +11,6 @@
 
 #include "Arduino.h"
 #include <SPI.h>
-// #include "MaxCC1101.h"
 #include "MaxCC1101.h"
 #include <ESP8266WiFi.h>
 #include <ESP8266WiFiMulti.h>
@@ -59,7 +58,48 @@ std::vector<state> states;
 std::queue<Message> queue;
 std::queue<CC1101Packet> received_messages;
 
-String bootedAt;
+String bootedAt = "";
+bool boot_time_set = false;
+
+/*
+1. Slow to reach setpoint:
+    Temperature
+    ____----''''''''target
+    time ->
+    → Increase P and/or I
+
+2. Overshooting:
+    Temperature
+         /\
+    ____/  \___target
+    time ->
+    → Decrease P and/or increase D
+
+3. Oscillating:
+    Temperature
+         /\/\/\/\
+    ____/      target
+    time ->
+    → Decrease P and I, increase D
+
+4. Never quite reaching setpoint:
+    Temperature
+    ____-------target
+    time ->
+    → Increase I
+*/
+TPIConfig tpiConfig = {
+    .cycleTime = 15.0,
+    .gainP = 40.0,
+    .gainI = 2.0,
+    .gainD = 0.0,
+    .minOnTime = 3.0,
+    .minOffTime = 5.0,
+    .integralLimitPositive = 40.0,
+    .integralLimitNegative = -40.0};
+
+// Add global TPI state variables
+unsigned long boiler_last_state_change = 0;
 
 void startBurner()
 {
@@ -75,6 +115,80 @@ void stopBurner()
 #endif
 }
 
+float calculateTPI(state *device)
+{
+  if (device->desired_temperature == UNDEFINED || device->measured_temperature == UNDEFINED)
+  {
+    return 0;
+  }
+
+  unsigned long delta = calculate_delta(device->tpi_last_calculation);
+  float delta_minutes = delta / 60000.0; // Convert to minutes
+
+  if (device->tpi_last_calculation == 0)
+  {
+    delta_minutes = 0;
+  }
+
+  float adjusted_desired_temp = device->desired_temperature - device->quiet_mode_offset;
+  float error = adjusted_desired_temp - device->measured_temperature;
+
+  float dTerm = 0;
+  const unsigned long FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
+
+  if (delta_minutes > 0)
+  {
+    unsigned long now = millis();
+
+    // If our stored error is too old or we don't have one yet, store current error
+    if (device->error_15min_timestamp == 0 || (now - device->error_15min_timestamp) >= FIFTEEN_MINUTES_MS)
+    {
+      device->error_15min_ago = error;
+      device->error_15min_timestamp = now;
+    }
+
+    // Calculate rate of change over 15 minutes for derivative term, because
+    // mostly error will be 0. Not sure if this is even correct.
+    float window_minutes = (now - device->error_15min_timestamp) / 60000.0;
+    if (window_minutes > 0)
+    {
+      dTerm = ((error - device->error_15min_ago) / 15.0) * tpiConfig.gainD;
+    }
+
+    float pTerm = error * tpiConfig.gainP;
+
+    // TODO: Should probably accumulate just around the setpoint, not the whole range.
+    device->tpi_integral += error * delta_minutes;
+
+    // Reset integral only when hitting limits to prevent windup
+    if ((error > 0 && device->tpi_integral >= tpiConfig.integralLimitPositive) ||
+        (error < 0 && device->tpi_integral <= tpiConfig.integralLimitNegative))
+    {
+      device->tpi_integral = 0;
+      Debug.printf("Integral Anti-windup: Reset integral for %s (error=%.2f)\n",
+                   device->name.c_str(), error);
+    }
+
+    // Clamp integral term to prevent windup
+    device->tpi_integral = constrain(device->tpi_integral, tpiConfig.integralLimitNegative, tpiConfig.integralLimitPositive);
+
+    float iTerm = device->tpi_integral * tpiConfig.gainI;
+
+    float output = pTerm + iTerm + dTerm;
+
+    // Constrain output to 0-100%
+    output = constrain(output, 0.0, 100.0);
+
+    Debug.printf("PID calc [%s]: Target=%.1f (offset=%.1f) Current=%.1f Error=%.2f P=%.1f I=%.1f D=%.1f Output=%.1f%%\n",
+                 device->name.c_str(), adjusted_desired_temp, device->quiet_mode_offset, device->measured_temperature,
+                 error, pTerm, iTerm, dTerm, output);
+
+    device->tpi_last_calculation = millis();
+    return output;
+  }
+
+  return 0;
+}
 ESP8266WiFiMulti wifiMulti;
 
 void setup_wifi()
@@ -224,8 +338,14 @@ unsigned int stringToBytes(byte *data, const char *payload, unsigned int length)
 
 state *findDeviceByAddress(byte *address)
 {
+  if (!address)
+  {
+    Debug.println("Error: Null address passed to findDeviceByAddress");
+    return nullptr;
+  }
+
   state *device;
-  for (int i = 0; i < states.size(); i++)
+  for (size_t i = 0; i < states.size(); i++)
   {
     device = &states[i];
 
@@ -249,7 +369,7 @@ state *findDeviceByName(String name)
   }
 
   state *device;
-  for (int i = 0; i < states.size(); i++)
+  for (size_t i = 0; i < states.size(); i++)
   {
     device = &states[i];
 
@@ -733,10 +853,14 @@ void publishState()
   StaticJsonDocument<capacity> doc;
   char output[128];
   doc["availability"] = "online";
-  doc["booted_at"] = bootedAt;
   doc["pairing_enabled"] = pairing_enabled;
   doc["autocreate"] = autocreate;
   doc["furnace_running"] = furnace_running;
+
+  if (boot_time_set)
+  {
+    doc["booted_at"] = bootedAt;
+  }
 
   serializeJson(doc, output);
   if (client.publish("max", output, true))
@@ -858,6 +982,12 @@ void set(state *device, byte *payload)
     {
       displayActualTemperature(device, value);
     }
+    else if (key == "quiet_mode_offset" && value.is<float>() && value >= 0.0)
+    {
+      device->quiet_mode_offset = value;
+      resetTPI(device);
+      config_changed = true;
+    }
   }
 }
 
@@ -947,7 +1077,6 @@ void setup(void)
   setupTime();
   Serial.println("Finished.");
   bootedAt = String(ntp.formattedTime("%Y-%m-%d %H:%M:%S"));
-
   client.setServer(MQTT_SERVER, 1883);
   client.setCallback(callback);
 
@@ -959,7 +1088,7 @@ void setup(void)
 }
 
 #define RUN 1
-#define KEEP 0
+// #define KEEP 0
 #define STOP -1
 
 int last_heating_state = STOP;
@@ -1033,11 +1162,19 @@ void loop(void)
   yield();
   ntp.update();
 
-  if (millis() > 10 * 24 * 60 * 60 * 1000)
+  if (!boot_time_set && isTimeSynced())
   {
-    Debug.println("******** Restarting after 10 days!");
-    ESP.restart();
+    bootedAt = String(ntp.formattedTime("%Y-%m-%d %H:%M:%S"));
+    Debug.printf("Boot time set to: %s\n", bootedAt.c_str());
+    boot_time_set = true;
+    publishState();
   }
+
+  // if (millis() > 10 * 24 * 60 * 60 * 1000)
+  // {
+  //   Debug.println("******** Restarting after 10 days!");
+  //   ESP.restart();
+  // }
 
   if (!received_messages.empty())
   {
@@ -1052,14 +1189,14 @@ void loop(void)
   yield();
 
 #ifdef CREDIT_15MIN
-  if (millis() - last_credited_at > 15 * 60 * 1000)
+  if (calculateDelta(last_credited_at) > 15 * 60 * 1000)
   {
     creditMs = CREDIT_15MIN;
     last_credited_at = millis();
   }
 #endif
 
-  if (config_changed && millis() - last_config_changed > 60 * 1000)
+  if (config_changed && calculate_delta(last_config_changed) > 60 * 1000)
   {
     config_changed = false;
     last_config_changed = millis(); // Timeout after config change
@@ -1067,7 +1204,7 @@ void loop(void)
   }
 
   // Sync time to device chunk every hour
-  if (millis() - last_time_sync_to_devices > 60 * 60 * 1000)
+  if (calculate_delta(last_time_sync_to_devices) > 60 * 60 * 1000)
   {
     syncTimeToDevices();
     yield();
@@ -1080,38 +1217,41 @@ void loop(void)
 
   syncValvesToWallThermostats();
 
-  const int heating_needed = isHeatingNeeded();
-  if (heating_needed == RUN)
+  bool last_heating_state = furnace_running;
+  furnace_running = isHeatingNeeded();
+
+  if (furnace_running)
   {
     startBurner();
 
-    if (last_heating_state != RUN)
+    if (last_heating_state != furnace_running)
     {
       Debug.println("******** Furnace run!");
       furnace_running = true;
       publishState();
     }
   }
-  else if (heating_needed == STOP)
+  else
   {
     stopBurner();
 
-    if (last_heating_state != STOP)
+    if (last_heating_state != furnace_running)
     {
       Debug.println("******** Furnace stop!");
       furnace_running = false;
       publishState();
     }
   }
-  last_heating_state = heating_needed;
 
   // We're not receiving commands, try to rfinit.
-  if (millis() - lastCommand >= 5 * 60 * 1000)
+  if (calculate_delta(lastCommand) >= 5 * 60 * 1000)
   {
     rfinit();
     Debug.println("We're not getting messages, trying to reinit.");
     client.publish("max/init", "RF init");
   }
+
+  delay(1000);
 }
 
 void bytesToString(char *buffer, byte *data, int length)
@@ -1135,20 +1275,17 @@ void checkForNewPacket()
 
 byte getByte(CC1101Packet *packet, unsigned int position)
 {
-  if (position > packet->length)
+  if (!packet || position >= packet->length)
   {
     return 0x00;
   }
-  else
-  {
-    return packet->data[position];
-  }
+  return packet->data[position];
 }
 
 template <size_t N>
 void getBytes(byte (&arr)[N], CC1101Packet *packet, unsigned int position)
 {
-  for (int i = 0; i < N; i++)
+  for (size_t i = 0; i < N; i++)
   {
     arr[i] = getByte(packet, position + i);
   }
@@ -1220,11 +1357,24 @@ void setType(state *device, int type)
   }
 }
 
+void resetTPI(state *device)
+{
+  // Reset TPI control variables
+  device->tpi_integral = 0;
+  device->tpi_last_calculation = millis();
+  device->tpi_output = 0;
+  device->error_15min_ago = 0;
+  device->error_15min_timestamp = 0;
+
+  Debug.printf("Reset TPI for device %s\n", device->name.c_str());
+}
+
 void setMode(state *device, int mode)
 {
   if (mode != device->mode)
   {
     device->mode_changed_timestamp = millis();
+    resetTPI(device);
   }
 
   device->mode = mode;
@@ -1235,11 +1385,10 @@ bool compareAddress(byte *first, const byte *second)
 {
   return first[0] == second[0] && first[1] == second[1] && first[2] == second[2];
 }
-
 #define STALE_DURATION 10 * 60 * 1000
 bool isFresh(unsigned long last_time)
 {
-  return (millis() - last_time) <= STALE_DURATION;
+  return calculate_delta(last_time) <= STALE_DURATION;
 }
 
 void sendAckTo(byte *address, byte msgcnt = 0)
@@ -1293,7 +1442,7 @@ state *findWallThermostatByRoom(String room)
   }
 
   state *device;
-  for (int i = 0; i < states.size(); i++)
+  for (size_t i = 0; i < states.size(); i++)
   {
     device = &states[i];
 
@@ -1310,7 +1459,7 @@ void syncValvesToWallThermostats()
 {
   state *device;
   // Clear valve position info
-  for (int i = 0; i < states.size(); i++)
+  for (size_t i = 0; i < states.size(); i++)
   {
     device = &states[i];
 
@@ -1337,29 +1486,7 @@ void syncValvesToWallThermostats()
   }
 }
 
-const byte MINIMUM_VALVE_POSITION_TO_HEAT PROGMEM = 53;
-const float HEAT_END_OFFSET PROGMEM = -0.2;
-const float HEAT_START_OFFSET PROGMEM = -0.4;
-
-int compareTemperature(float measured_temperature, float desired_temperature)
-{
-  if (measured_temperature == UNDEFINED || desired_temperature == UNDEFINED)
-  {
-    return STOP;
-  }
-
-  if (measured_temperature <= desired_temperature + HEAT_START_OFFSET)
-  {
-    return RUN;
-  }
-
-  if (measured_temperature >= desired_temperature + HEAT_END_OFFSET)
-  {
-    return STOP;
-  }
-
-  return KEEP;
-}
+const byte MINIMUM_VALVE_POSITION_TO_HEAT PROGMEM = 30;
 
 #define TWO_MINUTES 2 * 60 * 1000
 
@@ -1375,26 +1502,42 @@ unsigned long boost_duration_chunks_to_ms(byte boost_duration)
   return minutes * 60 * 1000;
 }
 
-int isHeatingNeeded()
+bool isHeatingNeeded()
 {
-  // -1 Stop
-  //  0 Keep
-  //  1 Run
-
-  int result = STOP;
-
   state *device;
-  for (int i = 0; i < states.size(); i++)
+  float max_pid_output = 0.0;
+
+  for (size_t i = 0; i < states.size(); i++)
   {
     device = &states[i];
 
+    // Skip stale or undefined mode devices
     if (!isFresh(device->timestamp) || device->mode == UNDEFINED)
     {
       continue;
     }
 
+    // Only check wall thermostats and heating thermostats
+    if (device->type != DEVICE_WALL_THERMOSTAT && device->type != DEVICE_HEATING_THERMOSTAT)
+    {
+      continue;
+    }
+
+    // Handle boost mode
+    if (device->mode == MODE_BOOST &&
+        millis() - device->mode_changed_timestamp < boost_duration_chunks_to_ms(device->boost_duration) - TWO_MINUTES)
+    {
+      return true;
+    }
+
     if (device->type == DEVICE_HEATING_THERMOSTAT)
     {
+      // Auto heating thermostats cannot trigger heating
+      if (device->mode == MODE_AUTO)
+      {
+        continue;
+      }
+
       // Ignore devices with binded thermostat
       state *thermostat = findWallThermostatByRoom(device->room);
       if (thermostat)
@@ -1403,26 +1546,60 @@ int isHeatingNeeded()
       }
     }
 
-    if (device->mode == MODE_BOOST && millis() - device->mode_changed_timestamp < boost_duration_chunks_to_ms(device->boost_duration) - TWO_MINUTES)
-    {
-      return RUN;
-    }
-
-    if (!isFresh(device->desired_temperature_timestamp) || !isFresh(device->measured_temperature_timestamp))
+    // Skip devices without fresh temperature readings
+    if (!isFresh(device->desired_temperature_timestamp) ||
+        !isFresh(device->measured_temperature_timestamp))
     {
       continue;
     }
 
-    // Manual mode on radiator thermostat if wall thermostat not binded
-    if (
-        (device->type == DEVICE_WALL_THERMOSTAT || (device->type == DEVICE_HEATING_THERMOSTAT && device->mode == MODE_MANUAL)) &&
-        device->valve_position > MINIMUM_VALVE_POSITION_TO_HEAT)
+    if (device->valve_position > MINIMUM_VALVE_POSITION_TO_HEAT)
     {
-      result = max(result, compareTemperature(device->measured_temperature, device->desired_temperature));
+      max_pid_output = max(device->tpi_output, max_pid_output);
     }
   }
 
-  return result;
+  unsigned long now = millis();
+  unsigned long cycle_position = (now / 1000) % (unsigned long)(tpiConfig.cycleTime * 60);
+  float cycle_percentage = cycle_position * 100.0 / (tpiConfig.cycleTime * 60);
+
+  bool new_furnace_state = cycle_percentage < max_pid_output;
+
+  if (fabs(fmod(cycle_percentage, 10.0)) < 0.1)
+  {
+    Debug.printf("PID: Cycle percentage %.1f%%, output %.1f%%\n", cycle_percentage, max_pid_output);
+  }
+
+  if (new_furnace_state != furnace_running)
+  {
+    unsigned long timeInCurrentState = calculate_delta(boiler_last_state_change);
+
+    bool is_min_time_enforced = boiler_last_state_change > 0;
+    if (is_min_time_enforced)
+    {
+      if (furnace_running && timeInCurrentState < tpiConfig.minOnTime * 60000)
+      {
+        Debug.printf("PID: Enforcing minimum ON time (%.1f minutes remaining)\n",
+                     (tpiConfig.minOnTime * 60000 - timeInCurrentState) / 60000.0);
+        return true;
+      }
+      if (!furnace_running && timeInCurrentState < tpiConfig.minOffTime * 60000)
+      {
+        Debug.printf("PID: Enforcing minimum OFF time (%.1f minutes remaining)\n",
+                     (tpiConfig.minOffTime * 60000 - timeInCurrentState) / 60000.0);
+        return false;
+      }
+    }
+
+    Debug.printf("PID: State changing from %s to %s (Cycle=%.1f%% Output=%.1f%%)\n",
+                 furnace_running ? "ON" : "OFF",
+                 new_furnace_state ? "ON" : "OFF",
+                 cycle_percentage,
+                 max_pid_output);
+    boiler_last_state_change = now;
+  }
+
+  return new_furnace_state;
 }
 
 void sendConfigurationTo(state *device)
@@ -1463,6 +1640,18 @@ void sendConfigurationTo(state *device)
 
 void handle(CC1101Packet *packet)
 {
+  if (!packet)
+  {
+    Debug.println("Error: Null packet received");
+    return;
+  }
+
+  if (packet->length < 3)
+  {
+    Debug.println("Error: Packet too short");
+    return;
+  }
+
   char buffer[packet->length * 2 + 1];
 
   bytesToString(buffer, packet->data, packet->length);
@@ -1555,6 +1744,12 @@ void handle(CC1101Packet *packet)
   }
   case THERMOSTAT_STATE_CMD:
   {
+    if (packet->length < 13)
+    {
+      Debug.println("Error: Invalid packet length for THERMOSTAT_STATE");
+      break;
+    }
+
     setType(device, DEVICE_HEATING_THERMOSTAT);
     short valve_position = getByte(packet, 12);
     device->valve_position = valve_position;
@@ -1585,10 +1780,16 @@ void handle(CC1101Packet *packet)
       parseDateTime(packet, 14);
     }
 
-    byte displayActualTemperature = getByte(packet, 12);
+    // byte displayActualTemperature = getByte(packet, 12);
     byte desiredTemperatureRaw = getByte(packet, 13);
     float desiredTemperature = (desiredTemperatureRaw & 0x7F) / 2.0;
     float measuredTemperature = (((getByte(packet, 14) & 0x01) << 8) + getByte(packet, 15)) / 10.0;
+
+    if (desiredTemperature != device->desired_temperature)
+    {
+      resetTPI(device);
+    }
+
     device->desired_temperature = desiredTemperature;
     device->desired_temperature_timestamp = millis();
     device->measured_temperature = measuredTemperature;
@@ -1596,8 +1797,11 @@ void handle(CC1101Packet *packet)
     Debug.print("STATE/Desired Temperature: ");
     Debug.print(desiredTemperature, 1);
     Debug.print(" Measured temperature: ");
-    Debug.println(measuredTemperature, 1);
+    Debug.print(measuredTemperature, 1);
+    Debug.println();
+
     // TODO: implement until?
+    device->tpi_output = calculateTPI(device);
     break;
   }
   case ACK_CMD:
@@ -1644,10 +1848,19 @@ void handle(CC1101Packet *packet)
 
       byte desiredTemperatureRaw = getByte(packet, 14);
       float desiredTemperature = (desiredTemperatureRaw & 0x7F) / 2.0;
+
+      bool shouldResetTPI = desiredTemperature != device->desired_temperature;
+
       device->desired_temperature = desiredTemperature;
       device->desired_temperature_timestamp = millis();
-      Debug.printf(", desired temperature: ");
+      Debug.print(", desired temperature: ");
       Debug.print(desiredTemperature);
+      Debug.println();
+      if (shouldResetTPI)
+      {
+        resetTPI(device);
+      }
+      device->tpi_output = calculateTPI(device);
     }
     else if (device->type == DEVICE_WALL_THERMOSTAT)
     {
@@ -1655,8 +1868,15 @@ void handle(CC1101Packet *packet)
       setDisplayActualTemperatureState(device, displayActualTemperature);
       byte desiredTemperatureRaw = getByte(packet, 14);
       float desiredTemperature = (desiredTemperatureRaw & 0x7F) / 2.0;
+
+      if (desiredTemperature != device->desired_temperature)
+      {
+        resetTPI(device);
+      }
+
       device->desired_temperature = desiredTemperature;
       device->desired_temperature_timestamp = millis();
+      device->tpi_output = calculateTPI(device);
 
       if (displayActualTemperature == DISPLAY_CURRENT_SETPOINT)
       {
@@ -1668,8 +1888,8 @@ void handle(CC1101Packet *packet)
       }
       Debug.printf(", desired temperature: ");
       Debug.print(desiredTemperature);
+      Debug.println();
     }
-    Debug.println();
     break;
   }
   case WALL_THERMOSTAT_CONTROL_CMD:
@@ -1678,10 +1898,17 @@ void handle(CC1101Packet *packet)
 
     float desiredTemperature = (getByte(packet, 11) & 0x7F) / 2.0;
     float measuredTemperature = (((getByte(packet, 11) & 0x80) << 1) + getByte(packet, 12)) / 10.0;
+
+    if (desiredTemperature != device->desired_temperature)
+    {
+      resetTPI(device);
+    }
+
     device->desired_temperature = desiredTemperature;
     device->desired_temperature_timestamp = millis();
     device->measured_temperature = measuredTemperature;
     device->measured_temperature_timestamp = millis();
+    device->tpi_output = calculateTPI(device);
     Serial.print("Control/Desired Temperature:  ");
     Serial.print(desiredTemperature);
     Serial.print(" Measured temperature: ");
@@ -1718,6 +1945,11 @@ void handle(CC1101Packet *packet)
     setMode(device, mode);
 
     float desiredTemperature = (modeAndTemperature & 0x3F) / 2.0;
+    if (desiredTemperature != device->desired_temperature)
+    {
+      resetTPI(device);
+    }
+
     device->desired_temperature = desiredTemperature;
     device->desired_temperature_timestamp = millis();
 
@@ -1831,4 +2063,10 @@ void handle(CC1101Packet *packet)
   client.publish(topic.c_str(), output, true);
 
   Debug.println(output);
+}
+
+unsigned long calculate_delta(unsigned long last)
+{
+  unsigned long now = millis();
+  return (now >= last) ? (now - last) : ((0xFFFFFFFF - last) + now);
 }

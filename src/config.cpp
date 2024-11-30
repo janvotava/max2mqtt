@@ -24,6 +24,15 @@ void parseDeviceConfigFile(state *device, String filename)
     return;
   }
 
+  Debug.printf("Contents of %s:\n", filename.c_str());
+  while (file.available())
+  {
+    Debug.write(file.read());
+  }
+  Debug.println("\n--- End of file ---");
+
+  file.seek(0);
+
   DeserializationError error = deserializeJson(config, file);
   if (error)
   {
@@ -64,6 +73,7 @@ void parseDeviceConfigFile(state *device, String filename)
     device->boost_valve_position = root["boost_valve_position"] | 100;
     device->max_valve_setting = root["max_valve_setting"] | 100;
     device->valve_offset = root["valve_offset"] | 0;
+    device->quiet_mode_offset = root["quiet_mode_offset"] | 0.0;
 
     byte association_address[3];
     if (root.containsKey("associations"))
@@ -179,7 +189,7 @@ bool saveConfig()
   configFile.close();
 
   state *device;
-  for (int i = 0; i < states.size(); i++)
+  for (size_t i = 0; i < states.size(); i++)
   {
     device = &states[i];
     if (device->address[0] == 0 &&
@@ -230,6 +240,7 @@ bool saveConfig()
       config["boost_valve_position"] = device->boost_valve_position;
       config["max_valve_setting"] = device->max_valve_setting;
       config["valve_offset"] = device->valve_offset;
+      config["quiet_mode_offset"] = device->quiet_mode_offset;
 
       JsonArray schedule = config.createNestedArray("schedule");
       for (byte weekDay = 0; weekDay < 7; weekDay++)

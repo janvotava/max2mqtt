@@ -56,7 +56,8 @@ void handle(CC1101Packet *packet);
 int stringToMode(String mode);
 unsigned int stringToBytes(byte *data, const char *payload, unsigned int length);
 
-int isHeatingNeeded();
+bool isHeatingNeeded();
+void resetTPI(state *device);
 
 extern bool autocreate;
 extern std::vector<state> states;
@@ -66,3 +67,32 @@ extern WiFiClient espClient;
 extern PubSubClient client;
 
 #define Debug Serial
+
+// Add these TPI-related declarations
+struct TPIConfig
+{
+  float cycleTime;             // Minutes
+  float gainP;                 // Proportional gain
+  float gainI;                 // Integral gain
+  float gainD;                 // Derivative gain
+  float minOnTime;             // Minimum on time in minutes
+  float minOffTime;            // Minimum off time in minutes
+  float integralLimitPositive; // Positive integral limit
+  float integralLimitNegative; // Negative integral limit
+};
+
+struct TPIState
+{
+  float integral;
+  unsigned long lastCalculation;
+  bool isOn;
+  unsigned long lastStateChange;
+};
+
+extern TPIConfig tpiConfig;
+extern TPIState tpiState;
+
+// Function declarations
+float calculateTPI(float targetTemp, float currentTemp);
+bool shouldHeat(float tpiOutput);
+unsigned long calculate_delta(unsigned long last);
