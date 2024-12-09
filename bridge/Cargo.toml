@@ -1,0 +1,14 @@
+[package]
+name = "max2mqtt-bridge"
+version = "0.1.0"
+edition = "2024"
+description = "eQ-3 MAX! protocol, heating control and MQTT bridge logic. no_std + alloc, tested on the host."
+publish = false
+
+[dependencies]
+log = "0.4"
+libm = "0.2"
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]

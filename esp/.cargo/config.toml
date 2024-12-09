@@ -1,0 +1,31 @@
+include = [{ path = "../secrets.toml", optional = true }]
+
+# Default board: Lolin C3 Mini (ESP32-C3), stable toolchain.
+[build]
+target = "riscv32imc-unknown-none-elf"
+
+[target.riscv32imc-unknown-none-elf]
+runner = "espflash flash --monitor --chip esp32c3 --partition-table partitions.csv --erase-parts otadata"
+# Required to obtain backtraces (e.g. when using the "esp-backtrace" crate.)
+rustflags = ["-C", "force-frame-pointers"]
+
+# ESP32-WROOM-32 boards (feature `d1-mini-esp32`): Xtensa, needs the `esp` toolchain from espup
+# and builds core/alloc from source. Use the aliases below.
+[target.xtensa-esp32-none-elf]
+runner = "espflash flash --monitor --chip esp32 --partition-table partitions.csv --erase-parts otadata"
+rustflags = ["-C", "link-arg=-nostartfiles"]
+
+[alias]
+build-esp32 = "build --release --no-default-features --features d1-mini-esp32 --target xtensa-esp32-none-elf -Zbuild-std=core,alloc"
+flash-esp32 = "run --release --no-default-features --features d1-mini-esp32 --target xtensa-esp32-none-elf -Zbuild-std=core,alloc"
+clippy-esp32 = "clippy --release --no-default-features --features d1-mini-esp32 --target xtensa-esp32-none-elf -Zbuild-std=core,alloc"
+
+# Defaults for the first boot; the web UI changes them at runtime. Secrets and per-board
+# values (Wi-Fi, password, MAX_CC1101_FREQ_OFFSET) go in secrets.toml: values here would
+# override the included file.
+[env]
+ESP_LOG = "info"
+MAX_HOSTNAME = "max"
+MAX_MQTT_HOST = "mqtt.lan"
+MAX_MQTT_PORT = "1883"
+MAX_NTP_SERVER = "pool.ntp.org"
