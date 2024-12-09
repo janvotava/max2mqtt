@@ -16,6 +16,9 @@ CC11xx pins    ESP pins   Description
 8 - CSN        15=D8      Chip select / (SPI_SS)
 ```
 
+Radio silent on a new board? See [docs/cc1101-shield.md](docs/cc1101-shield.md) for the check tool and the
+per-module frequency correction.
+
 ## Usage
 
 ```bash

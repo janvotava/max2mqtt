@@ -26,6 +26,11 @@ void MaxCC1101::initReceive()
   writeRegister(CC1101_SYNC1, 0xC6);
   writeRegister(CC1101_SYNC0, 0x26);
   writeRegister(CC1101_FSCTRL1, 0x06);
+#ifdef CC1101_FREQ_OFFSET
+  // Per-module crystal correction: signed steps of f_xosc/2^14 = 1.587 kHz. Take the value the
+  // module reports in FREQEST while receiving a MAX! packet. Not set = no correction.
+  writeRegister(CC1101_FSCTRL0, (uint8_t)(int8_t)(CC1101_FREQ_OFFSET));
+#endif
   writeRegister(CC1101_MDMCFG4, 0xC8); //DRATE_E=8,
   writeRegister(CC1101_MDMCFG3, 0x93); //DRATE_M=147, data rate = (256+DRATE_M)*2^DRATE_E/2^28*f_xosc = (9992.599) 1kbit/s (at f_xosc=26 Mhz)
   writeRegister(CC1101_MDMCFG2, 0x03);
