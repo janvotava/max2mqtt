@@ -78,6 +78,12 @@
 	<div class="row">
 		<button>{m.save()}</button>
 		<button type="button" class="link forget" onclick={forget}>{m.forget_device()}</button>
+		<button
+			type="button"
+			class="link forget"
+			onclick={(e) => confirm(m.factory_reset_device_confirm({ name: device.name })) && send(e, { factory_reset: true }, m.factory_reset_device_sent())}
+			>{m.factory_reset_device()}</button
+		>
 		{#if device.room}
 			<button
 				type="button"

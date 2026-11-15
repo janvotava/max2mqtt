@@ -139,6 +139,15 @@ M = {
     ),
     "save": ("Save", "Uložit"),
     "forget_device": ("Forget device", "Zapomenout zařízení"),
+    "factory_reset_device": ("Factory reset device", "Obnovit tovární nastavení zařízení"),
+    "factory_reset_device_confirm": (
+        "Factory reset {name}? It forgets its pairing, links and settings. Then hold boost on it: it pairs again and gets its room's settings back.",
+        "Obnovit tovární nastavení {name}? Zapomene spárování, propojení a nastavení. Pak na něm podržte boost: znovu se spáruje a dostane zpět nastavení své místnosti.",
+    ),
+    "factory_reset_device_sent": (
+        "Reset sent. Now hold boost on the device until it counts down.",
+        "Reset odeslán. Teď na zařízení podržte boost, dokud neodpočítává.",
+    ),
     "relink_sent": (
         "Sending the room's links again. Window sensors get theirs the next time they are opened or closed.",
         "Posílám propojení místnosti znovu. Okenní senzory je dostanou, až se příště otevřou nebo zavřou.",

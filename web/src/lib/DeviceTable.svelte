@@ -44,9 +44,22 @@
 							<span class="badge on" title={m.badge_no_answer_hint()}>{m.badge_no_answer()}</span>
 						{/if}
 					</td>
-					<td class="muted" title={d.rssi === undefined ? '' : `${d.rssi} dBm`}>{ago(d.seen_seconds_ago)}</td>
+					<td class="muted heard">
+						{ago(d.seen_seconds_ago)}{#if d.rssi !== undefined}<span class="dbm"> · {d.rssi} dBm</span>{/if}
+					</td>
 				</tr>
 			{/each}
 		</tbody>
 	</table>
 </div>
+
+<style>
+	.heard {
+		white-space: nowrap;
+	}
+	/* Secondary: there to compare reception, not to read first. */
+	.dbm {
+		opacity: 0.6;
+		font-size: 0.85em;
+	}
+</style>
