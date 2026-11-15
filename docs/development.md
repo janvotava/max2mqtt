@@ -109,57 +109,51 @@ since every attempt scans all channels and interrupts the hotspot.
 
 Tests: `cd bridge && cargo test`.
 
-## MQTT
+## MQTT and Home Assistant
 
-Topics and payloads stay as in the main README, with these changes:
+MQTT carries state and Home Assistant's commands, nothing else: rooms, week programs, names and heating
+settings are set in the web UI, so whatever can publish to the broker cannot reconfigure or erase the bridge.
+The prefix (`max` by default) is configurable, so a second board can run next to the first.
 
-- **Configurable prefix** (`max` by default), so a second board can run next to the first.
-- **Home Assistant discovery** (on by default), in the device-based format of Home Assistant 2024.11+: one
-  retained `homeassistant/device/max2mqtt_<address>/config` per device with a room, and one for the bridge.
-  Thermostats are `climate` entities (modes `auto` = week program, `heat` = manual at the comfort temperature,
-  `off` = 4.5 °C; presets `boost`, `eco`, `comfort`) with temperature, valve, battery and signal sensors; window
-  sensors are `binary_sensor`s. The bridge has the furnace, heat demand, a pairing switch and a restart button.
-  Removing a device's room removes it from Home Assistant. Everything is announced again when Home Assistant
-  publishes `online` on `homeassistant/status`. See `bridge/src/homeassistant.rs`.
+| Topic | |
+|---|---|
+| `max` (retained) | bridge state: `furnace_running`, `heat_demand` (%), `pairing_enabled`, `availability` (the will sets it to offline) |
+| `max/<name>` (retained) | one device: temperatures, `mode`, `valve_position`, `heating`, battery, `rf_error`, `rssi` |
+| `max/<name>/set` | `temperature` (°C, or `"eco"`, `"comfort"`, `"on"`, `"off"`), `mode` (`auto`, `manual`, `boost`, `temporary` with `"until":"YYYY-MM-DD HH:MM"`) |
+| `max/set` | `{"pair": true}` or `false` |
+| `max/reset` | restart (retained messages are ignored) |
+| `max/init` | published when the radio was re-initialised after 5 minutes without traffic |
 
-- **Schedules use start times.** `{"day":"monday","schedule":{"6:00":21.5,"22:30":4.5}}` means 21.5 °C from 6:00
-  and 4.5 °C from 22:30, with the evening temperature continuing until 6:00. The old firmware sent the keys as
-  "until" times and left out the closing 24:00 point. Several days can go in one message:
-  `{"schedule":{"monday":{...},"tuesday":{...}}}`. Times must be in 5 minute steps, at most 13 changes per day.
-- **`temperature` keeps auto mode.** A device in auto mode stays in auto (the device treats it as an override
-  until the next switch point). Send `"mode":"manual"` to leave auto mode. `temperature` also accepts `"eco"`,
-  `"comfort"`, `"on"` and `"off"`.
-- **`mode` without `temperature`.** `auto` and `boost` follow the device's own settings; `manual` reuses the
-  last known setpoint. `temporary` needs `"until":"YYYY-MM-DD HH:MM"` (minutes `00` or `30`).
-- **`boost_duration` is in minutes** (0, 5, ..., 30 or 60; other values round down).
-- **Only devices with a `room` heat.** They are also the only ones that get the time and are re-paired
-  automatically. Devices heard but not configured (for example a neighbour's) are still listed and published.
+A `temperature` keeps auto mode (the device treats it as an override until the next switch point); send
+`"mode":"manual"` to leave it. `heating` is true while the burner runs for that device's room.
+
+**Home Assistant discovery** (on by default) uses the device-based format of Home Assistant 2024.11+: one
+retained `homeassistant/device/max2mqtt_<address>/config` per device with a room, and one for the bridge.
+Thermostats are `climate` entities (modes `auto` = week program, `heat` = manual at the comfort temperature,
+`off` = 4.5 °C; presets `boost`, `eco`, `comfort`; action heating/idle from `heating`) with temperature, battery
+and signal sensors, and a valve sensor on radiator thermostats. Window sensors are `binary_sensor`s. The bridge
+has the furnace, heat demand, a pairing switch and a restart button. Removing a device's room removes it from
+Home Assistant. Everything is announced again when Home Assistant publishes `online` on
+`homeassistant/status`. See `bridge/src/homeassistant.rs`.
+
+## Heating and rooms
+
+- **Only devices with a room heat.** They are also the only ones that get the time, appear in Home Assistant
+  and are re-paired automatically. Devices heard but not configured (a neighbour's) are listed, nothing more.
 - **Rooms link their devices**, as a MAX! Cube does: the thermostats in a room get the same group id, and the
-  thermostats and window sensors in it are linked to each other, both ways. A radiator thermostat linked to a wall
+  thermostats and window sensors in it are linked to each other. A radiator thermostat linked to a wall
   thermostat follows its setpoint and regulates on its temperature; linked to a window sensor it drops to the
-  window-open temperature. Leaving a room removes the links and the group id. `{"relink":true}` on a device sends
-  its room's group id and links again, e.g. after a device was reset or replaced. Commands for window sensors and
-  eco switches wait until the device sends something (it only listens then), so open or close the window once.
-  Devices report `rf_error` when a link partner did not answer.
-- **The burner follows the valves.** The old PID on the room temperature is gone: each valve already regulates
-  its room, so the most-open valve in a room with a device is the heat demand, in any mode (auto included; the
-  old firmware ignored valves in auto). A 20 minute time-proportional cycle runs the burner for that share of the
-  time, with minimum on and off times. Valves open less than `min_valve_position` (30 %) do not count, and a
-  valve during its weekly descaling hour is ignored. `quiet_mode_offset` and `kp`/`ki`/`kd` are gone.
-- **Week programs per room.** `{"room_schedule":{"monday":{"6:00":21.5,"22:30":17},...}}` on any device sets
-  that program on every thermostat in its room (each device runs its own program; links do not pass on switch
-  points), the same as the web UI's week editor. A thermostat joining a room takes over the room's program.
-  Devices keep their program through battery changes; after a factory reset, pairing restores it.
-- **Pairing switches itself off** after 5 minutes (`{"pair":true}` on `max/set`, the Devices page, or the
-  Home Assistant switch), so a stranger's device in pairing mode later is not taken over.
-- **New on `max/set`:** `"heating":{...}` changes the burner cycle (`cycle_minutes`, `min_on_minutes`,
-  `min_off_minutes`, `min_valve_position`, `stale_minutes`), `"duty_cycle_limit":false` turns off the 1 % airtime limit, `"timezone":{...}` sets the
-  offset and EU daylight saving.
-- **`max/save-config`** now saves (the old firmware subscribed to it but did nothing). `max/format` erases the
-  config (devices, rooms, tuning) and restarts; the Wi-Fi and MQTT settings stay, so the board stays reachable.
-  A full factory reset is in the web UI. Retained messages on `max/reset` and `max/format` are ignored.
-- Device state includes `address`; bridge state includes `heat_demand` (the burner's share of the cycle, %),
-  `tx_queue` and `address`.
+  window-open temperature. Leaving a room removes the links and the group id. Commands for window sensors wait
+  until the sensor sends something (it only listens then), so open or close the window once.
+- **The burner follows the valves.** Each valve already regulates its room, so the most-open valve is the heat
+  demand. A 20 minute time-proportional cycle runs the burner for that share of the time, with minimum on and
+  off times. Valves open less than 30 % do not count, a valve during its weekly descaling hour is ignored, and a
+  reading older than 10 minutes counts as closed (an open valve reports every couple of minutes by itself).
+- **Week programs per room.** Saving a program sends it to every thermostat in the room (each runs its own
+  program; links do not pass on switch points). A thermostat joining a room takes over the room's program.
+- **Settings are tracked until confirmed.** Every setting a device has not acknowledged is kept (in flash) and
+  sent again when the device is heard, or every 15 minutes for thermostats. The Devices page shows them.
+- **Pairing switches itself off** after 5 minutes, so a stranger's device in pairing mode later is not taken over.
 
 ## Fixed bugs
 
@@ -207,6 +201,6 @@ From the C++ firmware, each covered by a test in `bridge`:
 - The `cc1101_check` radio test sketch.
 - mDNS. The router learns the hostname from DHCP, as before (`max.lan`).
 
-Tested on the HW-665 (ESP32): radio reception, Wi-Fi, time sync, storage, the web API, firmware updates and
-rollback. Not yet tested on hardware: transmitting to devices, pairing, MQTT and Home Assistant, the relay, the
-setup hotspot, and the C3 Mini.
+In use on the HW-665 (ESP32): radio in both directions, delivery tracking, the furnace relay, Wi-Fi, time sync,
+storage, the web UI, MQTT and Home Assistant, firmware updates and rollback, backup. Not yet tested on hardware:
+pairing a new device, the setup hotspot, and the C3 Mini.
