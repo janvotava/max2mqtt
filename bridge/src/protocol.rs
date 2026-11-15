@@ -12,7 +12,7 @@
 //! ```
 //! `len` counts the bytes after itself, so a frame without payload has `len = 10`.
 
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,35 @@ pub mod command {
     pub const SET_DISPLAY_ACTUAL_TEMPERATURE: u8 = 0x82;
     pub const RESET: u8 = 0xF0;
     pub const WAKE_UP: u8 = 0xF1;
+
+    /// For the log.
+    pub fn name(command: u8) -> &'static str {
+        match command {
+            PAIR_PING => "pairing request",
+            PAIR_PONG => "pairing answer",
+            ACK => "ACK",
+            TIME_INFORMATION => "time",
+            CONFIG_WEEK_PROFILE => "week program",
+            CONFIG_TEMPERATURES => "temperatures",
+            CONFIG_VALVE => "valve settings",
+            ADD_LINK_PARTNER => "link",
+            REMOVE_LINK_PARTNER => "unlink",
+            SET_GROUP_ID => "group",
+            REMOVE_GROUP_ID => "remove group",
+            SHUTTER_CONTACT_STATE => "window state",
+            SET_TEMPERATURE => "set temperature",
+            WALL_THERMOSTAT_CONTROL => "wall thermostat control",
+            SET_COMFORT_TEMPERATURE => "comfort",
+            SET_ECO_TEMPERATURE => "eco",
+            PUSH_BUTTON_STATE => "button",
+            THERMOSTAT_STATE => "radiator state",
+            WALL_THERMOSTAT_STATE => "wall thermostat state",
+            SET_DISPLAY_ACTUAL_TEMPERATURE => "display",
+            RESET => "factory reset",
+            WAKE_UP => "wake up",
+            _ => "unknown command",
+        }
+    }
 }
 
 /// Message flag set when the message is addressed to a group.
@@ -51,7 +80,7 @@ pub const FLAG_GROUP: u8 = 0x04;
 /// Bytes in a frame before the payload, including the length byte.
 pub const HEADER_LEN: usize = 11;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum DeviceType {
     #[serde(rename = "cube")]
     Cube,
@@ -179,6 +208,88 @@ impl Status {
             panel_locked: b & 0x20 != 0,
             rf_error: b & 0x40 != 0,
             low_battery: b & 0x80 != 0,
+        }
+    }
+}
+
+// ----- log text ---------------------------------------------------------------------
+// Readable summaries for the log: what a person debugging radio traffic needs, not every bit.
+
+impl core::fmt::Display for Status {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.mode.as_str())?;
+        for (on, what) in
+            [(self.panel_locked, "locked"), (self.rf_error, "radio error"), (self.low_battery, "battery low")]
+        {
+            if on {
+                write!(f, ", {what}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl core::fmt::Display for ThermostatState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}, valve {} %, target {} °C", self.status, self.valve_position, self.desired)?;
+        if let Some(m) = self.measured {
+            write!(f, ", measured {m} °C")?;
+        }
+        Ok(())
+    }
+}
+
+impl core::fmt::Display for WallThermostatState {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}, target {} °C", self.status, self.desired)?;
+        if let Some(m) = self.measured {
+            write!(f, ", measured {m} °C")?;
+        }
+        Ok(())
+    }
+}
+
+impl Message {
+    /// For the log. An ACK's state is decoded by the sender's type, when it is known.
+    pub fn describe(&self, sender: Option<DeviceType>) -> String {
+        use alloc::format;
+        match self {
+            Message::PairPing { device_type, serial, .. } => {
+                format!(
+                    "pairing request from a {}, serial {serial}",
+                    device_type.map_or("device of unknown type", |t| t.as_str())
+                )
+            }
+            Message::Ack { ok, state } => {
+                let verdict = if *ok { "ACK ok" } else { "ACK rejected" };
+                let decoded = match sender {
+                    Some(t) if t.is_heater() => parse_thermostat_state(state).map(|s| s.to_string()),
+                    Some(DeviceType::WallThermostat) => parse_wall_thermostat_state(state).map(|s| s.to_string()),
+                    Some(DeviceType::ShutterContact | DeviceType::PushButton) => {
+                        state.first().map(|&b| Status::from_byte(b).to_string())
+                    }
+                    _ => None,
+                };
+                match decoded {
+                    Some(d) => format!("{verdict}: {d}"),
+                    None if state.is_empty() => verdict.into(),
+                    None => format!("{verdict}, state {state:02X?}"),
+                }
+            }
+            Message::TimeRequest => "asks for the time".into(),
+            Message::TimeInformation => "time".into(),
+            Message::ThermostatState(s) => format!("state: {s}"),
+            Message::WallThermostatState(s) => format!("state: {s}"),
+            Message::WallThermostatControl { desired, measured } => {
+                format!("to its radiators: target {desired} °C, measured {measured} °C")
+            }
+            Message::SetTemperature { mode, desired } => format!("set {} {desired} °C", mode.as_str()),
+            Message::ShutterContactState { open, status } => {
+                format!("window {}, {status}", if *open { "open" } else { "closed" })
+            }
+            Message::PushButtonState { status } => format!("button: {status}"),
+            Message::Unknown => "unknown command".into(),
+            Message::Malformed => "too short to read".into(),
         }
     }
 }
@@ -660,6 +771,22 @@ mod tests {
             Message::Ack { ok: true, state: vec![0x01, 0x20, 42] }
         );
         assert_eq!(parse(&frame(command::ACK, vec![0x81])), Message::Ack { ok: false, state: vec![] });
+    }
+
+    #[test]
+    fn log_text_decodes_acks_by_sender_type() {
+        let ack = |state: Vec<u8>| Message::Ack { ok: true, state };
+        assert_eq!(
+            ack(vec![0x19, 0, 9]).describe(Some(DeviceType::HeatingThermostat)),
+            "ACK ok: manual, valve 0 %, target 4.5 °C"
+        );
+        assert_eq!(ack(vec![0x19, 4, 44]).describe(Some(DeviceType::WallThermostat)), "ACK ok: manual, target 22 °C");
+        assert_eq!(
+            ack(vec![0xC0]).describe(Some(DeviceType::ShutterContact)),
+            "ACK ok: auto, radio error, battery low"
+        );
+        assert_eq!(ack(vec![0x19, 0, 9]).describe(None), "ACK ok, state [19, 00, 09]");
+        assert_eq!(Message::Ack { ok: false, state: vec![] }.describe(None), "ACK rejected");
     }
 
     #[test]

@@ -121,7 +121,12 @@ pub struct DeviceConfig {
 pub enum Pending {
     Group,
     Link(Address),
+    /// From configs before [`Pending::Unlinked`]: resent only while the partner is known.
     Unlink(Address),
+    /// Remove the link to a partner, with its type: still sent after the partner was
+    /// forgotten, which is when it matters most (a device that keeps trying to reach a
+    /// partner that is gone reports a radio error).
+    Unlinked(Address, crate::protocol::DeviceType),
     Temperatures,
     Valve,
     Display,

@@ -120,6 +120,8 @@ pub struct Runtime {
     announced: Option<(String, String, DeviceType)>,
     /// When unconfirmed settings were last sent again.
     resent_at: Option<Millis>,
+    /// `heating` as last published, to publish again when it changes.
+    heating_sent: Option<bool>,
 }
 
 #[derive(Clone, Debug)]
@@ -150,6 +152,8 @@ pub struct Bridge {
     burner: Burner,
     demand: Demand,
     booted_at: Option<String>,
+    /// The latest time an entry point was called with, for state built outside one.
+    now: Millis,
     last_rx: Millis,
     last_time_sync: Millis,
     time_sync_slot: usize,
@@ -167,7 +171,9 @@ fn pending_item(cmd: u8, payload: &[u8]) -> Option<Pending> {
     Some(match cmd {
         command::SET_GROUP_ID | command::REMOVE_GROUP_ID => Pending::Group,
         command::ADD_LINK_PARTNER => Pending::Link(Address::from_slice(payload)?),
-        command::REMOVE_LINK_PARTNER => Pending::Unlink(Address::from_slice(payload)?),
+        command::REMOVE_LINK_PARTNER => {
+            Pending::Unlinked(Address::from_slice(payload)?, DeviceType::from_raw(*payload.get(3)?)?)
+        }
         command::CONFIG_TEMPERATURES => Pending::Temperatures,
         command::CONFIG_VALVE => Pending::Valve,
         command::SET_DISPLAY_ACTUAL_TEMPERATURE => Pending::Display,
@@ -261,6 +267,7 @@ impl Bridge {
             burner: Burner::default(),
             demand: Demand::default(),
             booted_at: None,
+            now,
             last_rx: now,
             last_time_sync: now,
             time_sync_slot: 0,
@@ -361,8 +368,14 @@ impl Bridge {
             let pending = &mut self.devices[i].cfg.pending;
             // A newer link command replaces the opposite one.
             match p {
-                Pending::Link(a) => _ = pending.remove(&Pending::Unlink(a)),
-                Pending::Unlink(a) => _ = pending.remove(&Pending::Link(a)),
+                Pending::Link(a) => {
+                    pending.retain(|q| !matches!(q, Pending::Unlink(b) | Pending::Unlinked(b, _) if *b == a))
+                }
+                Pending::Unlink(a) | Pending::Unlinked(a, _) => {
+                    pending.remove(&Pending::Link(a));
+                    // Stored by an earlier firmware: replaced by the item with the type.
+                    pending.remove(&Pending::Unlink(a));
+                }
                 _ => {}
             }
             self.pending_changed |= pending.insert(p);
@@ -417,7 +430,18 @@ impl Bridge {
         let next = self.tx.next(ctx.now, &mut events);
         self.log_events(events);
         if let Next::Send { bytes, long_preamble, .. } = &next {
-            log::info!("TX{} {}", if *long_preamble { " (long preamble)" } else { "" }, hex(bytes));
+            // Frame: length, counter, flags, command, source, destination, group, payload.
+            let to = bytes.get(7..10).and_then(Address::from_slice);
+            let to = match to.and_then(|a| self.find(a)) {
+                Some(i) if !self.devices[i].cfg.name.is_empty() => self.devices[i].cfg.name.clone(),
+                _ => to.map_or_else(String::new, |a| a.to_string()),
+            };
+            log::info!(
+                "TX {to}: {}{} {}",
+                command::name(bytes.get(3).copied().unwrap_or(0xFF)),
+                if *long_preamble { " (long preamble)" } else { "" },
+                hex(bytes)
+            );
         }
         next
     }
@@ -431,16 +455,24 @@ impl Bridge {
             let name = |a: Address| self.find(a).map_or_else(|| a.to_string(), |i| self.devices[i].cfg.name.clone());
             match e {
                 Event::Acked { dst, command, payload } => {
-                    log::info!("{} acknowledged command {command:#04x}", name(dst));
+                    log::info!("{} acknowledged {}", name(dst), command::name(command));
                     self.confirm(dst, command, &payload);
                 }
                 Event::Nacked { dst, command, payload } => {
-                    // Stays unconfirmed (shown in the UI), and goes out again with the other
-                    // unconfirmed settings: some rejections are passing, like during a boost.
-                    log::warn!("{} rejected command {command:#04x}: {payload:02X?}", name(dst));
+                    log::warn!("{} rejected {}: {payload:02X?}", name(dst), command::name(command));
+                    // Removing a link the device does not have is rejected: nothing left to do.
+                    // Anything else stays unconfirmed (shown in the UI) and goes out again with
+                    // the other unconfirmed settings: some rejections pass, like during a boost.
+                    if command == command::REMOVE_LINK_PARTNER {
+                        self.confirm(dst, command, &payload);
+                    }
                 }
                 Event::GaveUp { dst, command } => {
-                    log::warn!("Gave up sending command {command:#04x} to {}, will retry when it is heard", name(dst))
+                    log::warn!(
+                        "Gave up sending {} to {}, will retry when it is heard",
+                        command::name(command),
+                        name(dst)
+                    )
                 }
             }
         }
@@ -508,6 +540,7 @@ impl Bridge {
                         None => _ = self.devices[i].cfg.pending.remove(&p),
                     }
                 }
+                Pending::Unlinked(a, t) => self.send(addr, command::REMOVE_LINK_PARTNER, payload::link_partner(a, t)),
                 Pending::Temperatures => self.send_temperatures(i),
                 Pending::Valve => self.send_valve(i),
                 Pending::Display => match self.devices[i].cfg.display_actual_temperature {
@@ -777,6 +810,20 @@ impl Bridge {
             match serde_json::from_value::<DeviceType>(t.clone()) {
                 Ok(t) => self.set_type(i, t, now),
                 Err(_) => log::warn!("{name}: unknown device type {t}"),
+            }
+        }
+        // Remove a link the device still has to something the bridge no longer knows (a
+        // forgotten window sensor whose unlink never arrived): it keeps trying to reach it
+        // and reports a radio error. `{"unlink": {"address": "0FB714", "type": "shutter_contact"}}`.
+        if let Some(u) = obj.get("unlink") {
+            let address = u.get("address").and_then(Value::as_str).and_then(|a| a.parse::<Address>().ok());
+            let partner_type = u.get("type").and_then(|t| serde_json::from_value::<DeviceType>(t.clone()).ok());
+            match (address, partner_type) {
+                (Some(a), Some(t)) => {
+                    log::info!("{name}: removing its link to {a}");
+                    self.send(self.devices[i].cfg.address, command::REMOVE_LINK_PARTNER, payload::link_partner(a, t));
+                }
+                _ => log::warn!("{name}: unlink needs an address and a type"),
             }
         }
         if obj.get("relink").and_then(Value::as_bool) == Some(true) {
@@ -1120,6 +1167,7 @@ impl Bridge {
     pub fn handle_radio(&mut self, raw: &[u8], ctx: Ctx) -> Vec<Effect> {
         let mut out = Vec::new();
         let now = ctx.now;
+        self.now = now;
         if self.pairing_until.is_some_and(|t| now >= t) {
             self.pairing_until = None;
         }
@@ -1138,7 +1186,26 @@ impl Bridge {
         }
         let to_me = f.dst == me;
         let msg = parse(&f);
-        log::info!("RX {} -> {} cnt {} cmd {:#04x}, {} dBm: {:?}", f.src, f.dst, f.msgcnt, f.command, rx.rssi_dbm, msg);
+        let who = |a: Address| match self.find(a) {
+            Some(i) if !self.devices[i].cfg.name.is_empty() => self.devices[i].cfg.name.clone(),
+            _ if a == me => "bridge".into(),
+            _ if a.is_broadcast() => "all".into(),
+            _ => a.to_string(),
+        };
+        let sender_type = self.find(f.src).and_then(|i| self.devices[i].cfg.device_type);
+        log::info!(
+            "RX {} -> {} #{} {} dBm: {}",
+            who(f.src),
+            who(f.dst),
+            f.msgcnt,
+            rx.rssi_dbm,
+            msg.describe(sender_type)
+                + &if matches!(msg, Message::Unknown | Message::Malformed) {
+                    format!(" (command {:#04x}, {:02X?})", f.command, f.payload)
+                } else {
+                    String::new()
+                }
+        );
 
         let (i, is_new) = match self.find(f.src) {
             Some(i) => (i, false),
@@ -1475,6 +1542,7 @@ impl Bridge {
     pub fn tick(&mut self, ctx: Ctx) -> Vec<Effect> {
         let mut out = Vec::new();
         let now = ctx.now;
+        self.now = now;
 
         if self.booted_at.is_none()
             && let Some(unix) = ctx.unix_time
@@ -1542,6 +1610,14 @@ impl Bridge {
         }
         if on != was_on || demand_changed {
             self.publish_bridge(&mut out);
+        }
+        // "heating" follows the burner, the radiators and their readings going stale.
+        for i in 0..self.devices.len() {
+            let heating = self.heating(i);
+            if heating.is_some() && heating != self.devices[i].rt.heating_sent {
+                self.devices[i].rt.heating_sent = heating;
+                self.publish_device(i, &mut out);
+            }
         }
         out
     }
@@ -1635,20 +1711,38 @@ impl Bridge {
         });
     }
 
+    /// The most-open radiator in device `i`'s room, by the same freshness rule as the
+    /// burner's demand: a valve gone silent does not count.
+    fn room_valve(&self, i: usize) -> Option<u8> {
+        let d = &self.devices[i];
+        let stale = self.settings.heating.stale_minutes as Millis * MINUTE;
+        self.devices
+            .iter()
+            .filter(|o| o.is_heater() && o.cfg.room.is_some() && o.cfg.room == d.cfg.room)
+            .filter(|o| d.is_heater().then_some(o.cfg.address).is_none_or(|a| a == d.cfg.address))
+            .filter_map(|o| o.rt.valve.filter(|v| self.now.saturating_sub(v.at) <= stale).map(|v| v.value))
+            .max()
+    }
+
+    /// What Home Assistant shows as "heating": the burner is on, and this thermostat's room
+    /// (for a radiator: the radiator itself) calls for heat. An open valve alone is not
+    /// heating between burner cycles, nor is one whose reading went stale.
+    fn heating(&self, i: usize) -> Option<bool> {
+        let d = &self.devices[i];
+        (d.is_thermostat() && d.cfg.room.is_some()).then(|| {
+            self.burner.on && self.room_valve(i).is_some_and(|v| v >= self.settings.heating.min_valve_position)
+        })
+    }
+
     fn device_state(&self, i: usize) -> DeviceState<'_> {
         let d = &self.devices[i];
         let valve = if d.cfg.device_type == Some(DeviceType::WallThermostat) {
             // Highest valve in the room, as the old firmware published.
-            let stale = self.settings.heating.stale_minutes as Millis * MINUTE;
-            let now = d.rt.last_seen.unwrap_or(0);
-            self.devices
-                .iter()
-                .filter(|o| o.is_heater() && o.cfg.room.is_some() && o.cfg.room == d.cfg.room)
-                .filter_map(|o| o.rt.valve.filter(|v| now.saturating_sub(v.at) <= stale).map(|v| v.value))
-                .max()
+            self.room_valve(i)
         } else {
             d.rt.valve.map(|v| v.value)
         };
+        let heating = self.heating(i);
         DeviceState {
             address: d.cfg.address,
             device_type: d.cfg.device_type.map(DeviceType::as_str),
@@ -1657,6 +1751,7 @@ impl Bridge {
             measured_temperature: d.rt.measured.map(|t| round1(t.value)),
             desired_temperature: d.rt.desired.map(|t| round1(t.value)),
             valve_position: valve,
+            heating,
             open: d.rt.open,
             low_battery: d.rt.low_battery,
             rf_error: d.rt.rf_error,
@@ -1843,6 +1938,8 @@ pub struct DeviceState<'a> {
     desired_temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     valve_position: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heating: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     open: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2237,6 +2334,55 @@ mod tests {
     }
 
     #[test]
+    fn heating_means_the_burner_runs_for_the_room() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        let heating = |b: &Bridge, name: &str| b.device_state(b.find_by_name(name).unwrap()).heating;
+        // Valve at 50 %, burner not decided yet: open, but not heating.
+        assert_eq!(heating(&b, "living-room/heater"), Some(false));
+        let out = b.tick(ctx(1_000));
+        assert!(b.burner_on());
+        assert_eq!(heating(&b, "living-room/heater"), Some(true));
+        assert_eq!(heating(&b, "living-room/thermostat"), Some(true));
+        // Home Assistant hears about it without waiting for the devices.
+        assert_eq!(publishes(&out, "max/living-room/heater")[0]["heating"], true);
+    }
+
+    #[test]
+    fn heating_ignores_stale_rooms_and_follows_radiators() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        b.tick(ctx(1_000));
+        let wt = b.find(WT).unwrap();
+        assert_eq!(b.heating(wt), Some(true));
+        // The valve closes while the burner holds on (minimum on time): the wall thermostat
+        // is published as no longer heating, without having transmitted.
+        b.handle_radio(&rx(HT, ME, 2, command::THERMOSTAT_STATE, vec![0x01, 0, 42, 0, 200]), ctx(2_000));
+        let out = b.tick(ctx(3_000));
+        assert!(b.burner_on(), "held on by the minimum on time");
+        assert_eq!(publishes(&out, "max/living-room/thermostat")[0]["heating"], false);
+        // Open again, then silent past stale_minutes: not heating, even with the burner on.
+        b.handle_radio(&rx(HT, ME, 3, command::THERMOSTAT_STATE, vec![0x01, 80, 42, 0, 200]), ctx(4_000));
+        b.tick(ctx(5_000));
+        assert_eq!(b.heating(wt), Some(true));
+        b.burner.on = true;
+        b.now = 4_000 + 11 * MINUTE;
+        assert_eq!(b.heating(wt), Some(false));
+    }
+
+    #[test]
+    fn unlink_stored_by_the_previous_firmware_completes() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        drain(&mut b, 0);
+        let wt = b.find(WT).unwrap();
+        b.devices[wt].cfg.pending.insert(Pending::Unlink(HT));
+        b.send_pending(wt, 1);
+        drain(&mut b, 1);
+        assert!(b.devices[wt].cfg.pending.is_empty(), "{:?}", b.devices[wt].cfg.pending);
+    }
+
+    #[test]
     fn heating_settings_out_of_range_are_refused() {
         let mut b = bridge();
         b.configure_bridge(&json!({"heating": {"min_on_minutes": 1000000}}), ctx(0));
@@ -2249,6 +2395,23 @@ mod tests {
         let mut c = b.config();
         c.heating.min_on_minutes = f32::NAN;
         assert_eq!(Bridge::new(c, Topics::default(), 0).config().heating, HeatingConfig::default());
+    }
+
+    #[test]
+    fn rejected_unlink_counts_as_done() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        drain(&mut b, 0);
+        b.configure_device(WT, &json!({"unlink": {"address": "0FB714", "type": "shutter_contact"}}), ctx(1)).unwrap();
+        let Next::Send { id, bytes, .. } = b.next_tx(ctx(1)) else { panic!() };
+        b.transmitted(id, 1);
+        let mut raw = bytes.clone();
+        raw.extend_from_slice(&[0, 0x80]);
+        let f = decode_rx(&raw).unwrap().frame;
+        let mut events = Vec::new();
+        b.tx.ack(WT, f.msgcnt, false, &mut events);
+        b.log_events(events);
+        assert!(b.devices[b.find(WT).unwrap()].cfg.pending.is_empty(), "no such link: nothing to retry");
     }
 
     #[test]
@@ -2559,6 +2722,44 @@ mod tests {
         assert_eq!(count(command::ADD_LINK_PARTNER), 2);
         assert_eq!(count(command::CONFIG_TEMPERATURES), 2);
         assert_eq!(count(command::TIME_INFORMATION), 2);
+    }
+
+    #[test]
+    fn unlink_from_a_forgotten_partner_is_retried() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        drain(&mut b, 0);
+        b.forget_device(HT, ctx(1)).unwrap();
+        let wt = b.find(WT).unwrap();
+        let unlink = Pending::Unlinked(HT, DeviceType::HeatingThermostat);
+        assert!(b.devices[wt].cfg.pending.contains(&unlink), "{:?}", b.devices[wt].cfg.pending);
+        // The first try is lost; the resend still knows what to say, with the partner gone.
+        b.tx = TxQueue::new(false, 1);
+        b.send_pending(wt, 2);
+        let s = sent(&drain(&mut b, 2));
+        assert!(s.contains(&(
+            WT,
+            command::REMOVE_LINK_PARTNER,
+            payload::link_partner(HT, DeviceType::HeatingThermostat)
+        )));
+        assert!(!b.devices[wt].cfg.pending.contains(&unlink), "confirmed by the ACK");
+    }
+
+    #[test]
+    fn unlink_reaches_a_partner_the_bridge_forgot() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        drain(&mut b, 0);
+        let gone = Address([0x0F, 0xB7, 0x14]);
+        b.configure_device(WT, &json!({"unlink": {"address": "0FB714", "type": "shutter_contact"}}), ctx(1)).unwrap();
+        let s = sent(&drain(&mut b, 1));
+        assert!(s.contains(&(
+            WT,
+            command::REMOVE_LINK_PARTNER,
+            payload::link_partner(gone, DeviceType::ShutterContact)
+        )));
+        b.configure_device(WT, &json!({"unlink": {"address": "0FB714"}}), ctx(2)).unwrap();
+        assert!(drain(&mut b, 2).is_empty(), "without a type nothing is sent");
     }
 
     #[test]

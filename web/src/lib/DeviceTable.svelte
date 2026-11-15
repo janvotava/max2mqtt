@@ -31,7 +31,7 @@
 					</td>
 					<td>{celsius(d.desired_temperature)}</td>
 					<td>{d.mode ?? '–'}</td>
-					<td>{d.valve_position === undefined ? '–' : `${d.valve_position} %`}</td>
+					<td>{d.valve_position === undefined || d.type === 'thermostat' ? '–' : `${d.valve_position} %`}</td>
 					<td>
 						{#if d.low_battery}<span class="badge on">battery</span>{/if}
 						{#if d.unconfirmed}

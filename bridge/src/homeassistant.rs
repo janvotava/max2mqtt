@@ -67,9 +67,9 @@ const PRESET_STATE: &str =
 const PRESET_COMMAND: &str = "{% if value == 'boost' %}{\"mode\": \"boost\"}\
 {% elif value in ['eco', 'comfort'] %}{\"temperature\": \"{{ value }}\"}\
 {% else %}{\"mode\": \"auto\"}{% endif %}";
-const ACTION: &str = "{% if value_json.valve_position is not defined %}\
-{% elif value_json.desired_temperature is defined and value_json.desired_temperature <= 4.5 %}off\
-{% elif value_json.valve_position > 0 %}heating{% else %}idle{% endif %}";
+/// `heating` only while the burner runs for this room, see `Bridge::device_state`.
+const ACTION: &str = "{% if value_json.desired_temperature is defined and value_json.desired_temperature <= 4.5 %}off\
+{% elif value_json.heating is defined %}{{ 'heating' if value_json.heating else 'idle' }}{% endif %}";
 
 /// Component keys per device type; keys from an earlier type are removed explicitly.
 fn components(t: DeviceType) -> &'static [&'static str] {
@@ -77,7 +77,9 @@ fn components(t: DeviceType) -> &'static [&'static str] {
         DeviceType::HeatingThermostat | DeviceType::HeatingThermostatPlus => {
             &["climate", "temperature", "valve", "battery", "rssi"]
         }
-        DeviceType::WallThermostat => &["climate", "temperature", "valve", "battery", "rssi"],
+        // No valve sensor: a wall thermostat's valve is the room's most-open radiator, which
+        // has its own. The climate entity still uses it for heating/idle.
+        DeviceType::WallThermostat => &["climate", "temperature", "battery", "rssi"],
         DeviceType::ShutterContact => &["window", "battery", "rssi"],
         DeviceType::PushButton => &["battery", "rssi"],
         DeviceType::Cube => &[],
@@ -383,6 +385,10 @@ impl Discovery<'_> {
             for &key in components(prev) {
                 cmps.entry(key).or_insert(Component::Removed { p: platform(key) });
             }
+        }
+        // Announced by earlier versions.
+        if t == DeviceType::WallThermostat {
+            cmps.entry("valve").or_insert(Component::Removed { p: "sensor" });
         }
         let dev = Device {
             ids: [uid],

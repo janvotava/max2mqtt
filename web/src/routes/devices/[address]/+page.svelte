@@ -32,7 +32,8 @@
 			<dt>Temperature</dt><dd>{celsius(live.measured_temperature)}</dd>
 			<dt>Target</dt><dd>{celsius(live.desired_temperature)}</dd>
 			<dt>Mode</dt><dd>{live.mode ?? '–'}</dd>
-			{#if live.valve_position !== undefined}<dt>Valve</dt><dd>{live.valve_position} %</dd>{/if}
+			<!-- A wall thermostat's valve is just the room's most-open radiator, listed there. -->
+			{#if live.valve_position !== undefined && live.type !== 'thermostat'}<dt>Valve</dt><dd>{live.valve_position} %</dd>{/if}
 			{#if live.open !== undefined}<dt>Window</dt><dd>{live.open ? 'open' : 'closed'}</dd>{/if}
 			<dt>Battery</dt><dd>{live.low_battery ? 'low' : 'ok'}</dd>
 			{#if live.rf_error}<dt>Radio</dt><dd class="error">got no answer from a link partner</dd>{/if}

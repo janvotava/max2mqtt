@@ -7,9 +7,13 @@
 	let { device }: { device: DeviceConfig } = $props();
 
 	interface Point {
+		/** Stable while the time is edited: keying rows by time rebuilt them mid-typing. */
+		id: number;
 		time: string;
 		temp: number;
 	}
+	let nextId = 0;
+	const point = (time: string, temp: number): Point => ({ id: nextId++, time, temp });
 	type Week = Record<Day, Point[]>;
 
 	const MAX_POINTS = 13;
@@ -32,13 +36,13 @@
 
 	function load(d: DeviceConfig): Week {
 		const fallback = (): Point[] => [
-			{ time: '06:00', temp: d.temperatures.comfort },
-			{ time: '22:00', temp: d.temperatures.eco }
+			point('06:00', d.temperatures.comfort),
+			point('22:00', d.temperatures.eco)
 		];
 		return Object.fromEntries(
 			DAYS.map((day) => {
 				const stored = d.schedule?.[day];
-				const points = stored ? Object.entries(stored).map(([time, temp]) => ({ time, temp })) : fallback();
+				const points = stored ? Object.entries(stored).map(([time, temp]) => point(time, temp)) : fallback();
 				return [day, sorted(points)];
 			})
 		) as Week;
@@ -47,13 +51,16 @@
 	const initial = untrack(() => $state.snapshot(device));
 	const known = Object.keys(initial.schedule ?? {}).length > 0;
 	let week = $state<Week>(load(initial));
-	let saved = $state(JSON.stringify(load(initial)));
+	/** The program without ids or editing order, to compare and send. */
+	const plain = (w: Week) =>
+		Object.fromEntries(DAYS.map((d) => [d, Object.fromEntries(sorted(w[d]).map((p) => [p.time, p.temp]))]));
+	let saved = $state(JSON.stringify(plain(load(initial))));
 	let open = $state<Day | null>(null);
 	let busy = $state(false);
 	let message = $state('');
 	let error = $state('');
 
-	const changed = $derived(JSON.stringify(week) !== saved);
+	const changed = $derived(JSON.stringify(plain(week)) !== saved);
 
 	/** Blocks of one day for the bar: start, end (minutes) and temperature. */
 	function blocks(points: Point[]) {
@@ -85,11 +92,11 @@
 		const p = sorted(week[day]);
 		const last = p.length ? minutes(p[p.length - 1].time) : 6 * 60;
 		const time = hhmm(Math.min(23 * 60 + 55, last + 60));
-		week[day] = sorted([...week[day], { time, temp: device.temperatures.comfort }]);
+		week[day] = sorted([...week[day], point(time, device.temperatures.comfort)]);
 	}
 
 	function copy(from: Day, to: readonly Day[]) {
-		for (const d of to) if (d !== from) week[d] = week[from].map((p) => ({ ...p }));
+		for (const d of to) if (d !== from) week[d] = week[from].map((p) => point(p.time, p.temp));
 		message = '';
 	}
 
@@ -97,12 +104,10 @@
 		busy = true;
 		message = '';
 		error = '';
-		const body = Object.fromEntries(
-			DAYS.map((d) => [d, Object.fromEntries(sorted(week[d]).map((p) => [p.time, p.temp]))])
-		);
+		const body = plain(week);
 		try {
 			await post(`/devices/${device.address}`, { room_schedule: body });
-			saved = JSON.stringify(week);
+			saved = JSON.stringify(body);
 			message = device.room
 				? `Sent to every thermostat in ${device.room}.`
 				: 'Sent to this thermostat.';
@@ -153,16 +158,14 @@
 			</button>
 			{#if open === day}
 				<div class="edit">
-					{#each sorted(week[day]) as p, k (p.time + k)}
+					{#each week[day] as p (p.id)}
 						<div class="point">
+							<!-- Sorted once the field is left: re-sorting while typing moved the row. -->
 							<input
 								type="time"
 								step="300"
-								value={p.time}
-								onchange={(e) => {
-									p.time = e.currentTarget.value;
-									week[day] = sorted(week[day]);
-								}}
+								bind:value={p.time}
+								onblur={() => (week[day] = sorted(week[day]))}
 								aria-label="Start time"
 							/>
 							<input type="number" min="4.5" max="30.5" step="0.5" bind:value={p.temp} aria-label="Temperature" />
@@ -201,7 +204,7 @@
 	<div class="row">
 		<button disabled={busy || !changed || invalid.length > 0} onclick={save}>{busy ? 'Sending…' : 'Save program'}</button>
 		{#if changed}
-			<button type="button" class="link" onclick={() => (week = JSON.parse(saved))}>Discard changes</button>
+			<button type="button" class="link" onclick={() => (week = load({ ...initial, schedule: JSON.parse(saved) }))}>Discard changes</button>
 		{/if}
 		{#if invalid.length}<span class="error">Fix {invalid.map(([d]) => label[d]).join(', ')}</span>{/if}
 	</div>
