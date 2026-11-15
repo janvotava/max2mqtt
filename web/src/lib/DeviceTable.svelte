@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { ago, celsius, typeName } from './format.js';
+	import { ago, celsius, modeName, typeName } from './format.js';
+	import { m } from './paraglide/messages.js';
 	import type { DeviceStatus } from './types.js';
 
 	let { devices, showRoom = false }: { devices: DeviceStatus[]; showRoom?: boolean } = $props();
@@ -9,9 +10,11 @@
 	<table>
 		<thead>
 			<tr>
-				<th>Name</th>
-				{#if showRoom}<th>Room</th>{/if}
-				<th>Type</th><th>Now</th><th>Target</th><th>Mode</th><th>Valve</th><th></th><th>Heard</th>
+				<th>{m.col_name()}</th>
+				{#if showRoom}<th>{m.col_room()}</th>{/if}
+				<th>{m.col_type()}</th><th>{m.col_now()}</th><th>{m.col_target()}</th><th>{m.col_mode()}</th><th
+					>{m.col_valve()}</th
+				><th></th><th>{m.col_heard()}</th>
 			</tr>
 		</thead>
 		<tbody>
@@ -25,22 +28,20 @@
 							? d.open === undefined
 								? '–'
 								: d.open
-									? 'open'
-									: 'closed'
+									? m.open()
+									: m.closed()
 							: celsius(d.measured_temperature)}
 					</td>
 					<td>{celsius(d.desired_temperature)}</td>
-					<td>{d.mode ?? '–'}</td>
+					<td>{modeName(d.mode)}</td>
 					<td>{d.valve_position === undefined || d.type === 'thermostat' ? '–' : `${d.valve_position} %`}</td>
 					<td>
-						{#if d.low_battery}<span class="badge on">battery</span>{/if}
+						{#if d.low_battery}<span class="badge on">{m.badge_battery()}</span>{/if}
 						{#if d.unconfirmed}
-							<span class="badge" title="Settings sent but not acknowledged yet; sent again when the device is heard."
-								>{d.unconfirmed} unconfirmed</span
-							>
+							<span class="badge" title={m.badge_unconfirmed_hint()}>{m.badge_unconfirmed({ n: d.unconfirmed })}</span>
 						{/if}
 						{#if d.rf_error}
-							<span class="badge on" title="The device got no answer from a link partner. Re-link its room, or check the partner's batteries.">no answer</span>
+							<span class="badge on" title={m.badge_no_answer_hint()}>{m.badge_no_answer()}</span>
 						{/if}
 					</td>
 					<td class="muted" title={d.rssi === undefined ? '' : `${d.rssi} dBm`}>{ago(d.seen_seconds_ago)}</td>

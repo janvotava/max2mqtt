@@ -71,6 +71,11 @@ Flash from the earlier two-slot format is erased on the first boot.
 on the home network and on the setup hotspot. The API needs HTTP Basic auth with the device password (any user
 name); the UI keeps it in session storage. It is plain HTTP, so the password is readable on the local network.
 
+The UI is in English and Czech ([Paraglide JS](https://paraglidejs.com)); the switch is in the header, and
+without a choice the browser's language decides. Every text is in `web/messages/build.py`, one line per message
+with both languages: edit it there and run `python3 messages/build.py` in `web/`, which writes
+`messages/en.json` and `messages/cs.json`. The build compiles them into `src/lib/paraglide/`.
+
 ### Firmware updates
 
 `partitions.csv` has two app slots. `fw-image` (C3 Mini) or `fw-esp32-image` (ESP32) builds an app image

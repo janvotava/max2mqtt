@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { m } from '#lib/paraglide/messages.js';
 	import { untrack } from 'svelte';
 	import { invalidate } from '$app/navigation';
 	import { post } from '#lib/api.svelte.js';
@@ -18,13 +19,13 @@
 
 	const MAX_POINTS = 13;
 	const label: Record<Day, string> = {
-		monday: 'Mon',
-		tuesday: 'Tue',
-		wednesday: 'Wed',
-		thursday: 'Thu',
-		friday: 'Fri',
-		saturday: 'Sat',
-		sunday: 'Sun'
+		monday: m.day_monday(),
+		tuesday: m.day_tuesday(),
+		wednesday: m.day_wednesday(),
+		thursday: m.day_thursday(),
+		friday: m.day_friday(),
+		saturday: m.day_saturday(),
+		sunday: m.day_sunday()
 	};
 	const minutes = (t: string) => {
 		const [h, m] = t.split(':').map(Number);
@@ -78,12 +79,12 @@
 	const shade = (t: number) => `color-mix(in oklch, var(--accent) ${strength(t)}%, var(--line))`;
 
 	function problems(points: Point[]): string | null {
-		if (!points.length) return 'needs at least one switch point';
-		if (points.length > MAX_POINTS) return `devices hold at most ${MAX_POINTS} switch points`;
+		if (!points.length) return m.wp_needs_point();
+		if (points.length > MAX_POINTS) return m.wp_too_many({ n: MAX_POINTS });
 		const times = points.map((p) => p.time);
-		if (times.some((t) => !/^\d\d:\d\d$/.test(t) || minutes(t) % 5)) return 'times must be in 5 minute steps';
-		if (new Set(times).size !== times.length) return 'two switch points at the same time';
-		if (points.some((p) => !(p.temp >= 4.5 && p.temp <= 30.5))) return 'temperatures must be 4.5–30.5 °C';
+		if (times.some((t) => !/^\d\d:\d\d$/.test(t) || minutes(t) % 5)) return m.wp_five_minutes();
+		if (new Set(times).size !== times.length) return m.wp_same_time();
+		if (points.some((p) => !(p.temp >= 4.5 && p.temp <= 30.5))) return m.wp_range();
 		return null;
 	}
 	const invalid = $derived(DAYS.map((d) => [d, problems(week[d])] as const).filter(([, p]) => p));
@@ -109,8 +110,8 @@
 			await post(`/devices/${device.address}`, { room_schedule: body });
 			saved = JSON.stringify(body);
 			message = device.room
-				? `Sent to every thermostat in ${device.room}.`
-				: 'Sent to this thermostat.';
+				? m.wp_sent_room({ room: device.room })
+				: m.wp_sent_one();
 			await invalidate('app:device');
 		} catch (e) {
 			error = (e as Error).message;
@@ -122,14 +123,11 @@
 
 <section class="card">
 	<div class="row title">
-		<h2>Week program</h2>
-		<span class="muted">{device.room ? `for the whole ${device.room}` : 'for this thermostat'}</span>
+		<h2>{m.week_program()}</h2>
+		<span class="muted">{device.room ? m.wp_for_room({ room: device.room }) : m.wp_for_one()}</span>
 	</div>
 	{#if !known}
-		<p class="muted">
-			The bridge has not set a program on this device yet, so this shows the default: comfort from 6:00, eco from 22:00.
-			The device keeps its own until you save.
-		</p>
+		<p class="muted">{m.wp_default()}</p>
 	{/if}
 
 	<div class="week">
@@ -166,14 +164,14 @@
 								step="300"
 								bind:value={p.time}
 								onblur={() => (week[day] = sorted(week[day]))}
-								aria-label="Start time"
+								aria-label={m.start_time()}
 							/>
-							<input type="number" min="4.5" max="30.5" step="0.5" bind:value={p.temp} aria-label="Temperature" />
+							<input type="number" min="4.5" max="30.5" step="0.5" bind:value={p.temp} aria-label={m.temperature()} />
 							<span class="muted">°C</span>
 							<button
 								type="button"
 								class="link"
-								aria-label="Remove"
+								aria-label={m.remove()}
 								disabled={week[day].length === 1}
 								onclick={() => (week[day] = week[day].filter((x) => x !== p))}>✕</button
 							>
@@ -181,12 +179,12 @@
 					{/each}
 					<div class="row actions">
 						<button type="button" class="secondary" disabled={week[day].length >= MAX_POINTS} onclick={() => add(day)}>
-							Add switch point
+							{m.add_point()}
 						</button>
-						<span class="muted">Copy to</span>
-						<button type="button" class="link" onclick={() => copy(day, DAYS.slice(0, 5))}>weekdays</button>
-						<button type="button" class="link" onclick={() => copy(day, DAYS.slice(5))}>weekend</button>
-						<button type="button" class="link" onclick={() => copy(day, DAYS)}>every day</button>
+						<span class="muted">{m.copy_to()}</span>
+						<button type="button" class="link" onclick={() => copy(day, DAYS.slice(0, 5))}>{m.weekdays()}</button>
+						<button type="button" class="link" onclick={() => copy(day, DAYS.slice(5))}>{m.weekend()}</button>
+						<button type="button" class="link" onclick={() => copy(day, DAYS)}>{m.every_day()}</button>
 					</div>
 					{#if problems(week[day])}<p class="error">{problems(week[day])}</p>{/if}
 				</div>
@@ -198,15 +196,15 @@
 		</div>
 	</div>
 
-	<p class="muted">Each time is when its temperature starts; the last one holds until the first one the next day.</p>
+	<p class="muted">{m.wp_hint()}</p>
 	{#if message}<p class="ok">{message}</p>{/if}
 	{#if error}<p class="error">{error}</p>{/if}
 	<div class="row">
-		<button disabled={busy || !changed || invalid.length > 0} onclick={save}>{busy ? 'Sending…' : 'Save program'}</button>
+		<button disabled={busy || !changed || invalid.length > 0} onclick={save}>{busy ? m.sending() : m.save_program()}</button>
 		{#if changed}
-			<button type="button" class="link" onclick={() => (week = load({ ...initial, schedule: JSON.parse(saved) }))}>Discard changes</button>
+			<button type="button" class="link" onclick={() => (week = load({ ...initial, schedule: JSON.parse(saved) }))}>{m.discard()}</button>
 		{/if}
-		{#if invalid.length}<span class="error">Fix {invalid.map(([d]) => label[d]).join(', ')}</span>{/if}
+		{#if invalid.length}<span class="error">{m.fix_days({ days: invalid.map(([d]) => label[d]).join(', ') })}</span>{/if}
 	</div>
 </section>
 

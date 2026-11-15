@@ -1,3 +1,4 @@
+import { m } from './paraglide/messages.js';
 // API client. The password lives in sessionStorage (or localStorage with "remember me")
 // and goes along as HTTP Basic auth. A 401 drops it, which shows the login form again.
 
@@ -61,7 +62,7 @@ export async function api<T>(method: string, path: string, body?: unknown, timeo
 			// next attempt, or give up below
 		}
 	}
-	if (!response) throw new ApiError(0, 'The board does not answer');
+	if (!response) throw new ApiError(0, m.board_no_answer());
 	const data = await response.json().catch(() => ({}));
 	if (response.status === 401) logout();
 	if (!response.ok) throw new ApiError(response.status, data.error ?? response.statusText);
@@ -92,7 +93,7 @@ export function uploadFirmware(file: File, onProgress: (fraction: number) => voi
 			if (xhr.status === 401) logout();
 			reject(new ApiError(xhr.status, message));
 		};
-		xhr.onerror = () => reject(new ApiError(0, 'The upload was interrupted'));
+		xhr.onerror = () => reject(new ApiError(0, m.upload_interrupted()));
 		xhr.send(file);
 	});
 }

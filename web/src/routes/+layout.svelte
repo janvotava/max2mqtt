@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { m } from '#lib/paraglide/messages.js';
+	import { getLocale, locales, setLocale } from '#lib/paraglide/runtime.js';
 	import { invalidateAll } from '$app/navigation';
 	import { page } from '$app/state';
 	import { auth, login, logout, get, ApiError } from '#lib/api.svelte.js';
@@ -21,17 +23,21 @@
 			password = '';
 			await invalidateAll();
 		} catch (err) {
-			error = err instanceof ApiError && err.status === 401 ? 'Wrong password' : (err as Error).message;
+			error = err instanceof ApiError && err.status === 401 ? m.wrong_password() : (err as Error).message;
 		} finally {
 			busy = false;
 		}
 	}
 
 	const links = [
-		{ href: '#/', path: '/', label: 'Devices' },
-		{ href: '#/settings', path: '/settings', label: 'Settings' },
-		{ href: '#/logs', path: '/logs', label: 'Log' }
+		{ href: '#/', path: '/', label: m.nav_devices() },
+		{ href: '#/settings', path: '/settings', label: m.nav_settings() },
+		{ href: '#/logs', path: '/logs', label: m.nav_log() }
 	];
+	// For screen readers and hyphenation; setLocale reloads the page with the new one.
+	$effect(() => {
+		document.documentElement.lang = getLocale();
+	});
 	// The route, not the URL: with hash routing the page's path is in the hash.
 	// Device pages belong to the device list (`/`).
 	const current = (path: string) =>
@@ -39,13 +45,21 @@
 </script>
 
 <header>
-	<a class="brand" href="#/">max2mqtt</a>
+	<!-- One baseline: centring boxes of different font sizes left the switch looking high. -->
+	<div class="start">
+		<a class="brand" href="#/">max2mqtt</a>
+		<span class="lang" role="group" aria-label={m.language()}>
+			{#each locales as l (l)}
+				<button class="link" aria-pressed={l === getLocale()} onclick={() => setLocale(l)}>{l.toUpperCase()}</button>
+			{/each}
+		</span>
+	</div>
 	{#if auth.password !== null}
 		<nav>
 			{#each links as l (l.href)}
 				<a href={l.href} aria-current={current(l.path) ? 'page' : undefined}>{l.label}</a>
 			{/each}
-			<button class="link" onclick={logout}>Log out</button>
+			<button class="link" onclick={logout}>{m.log_out()}</button>
 		</nav>
 	{/if}
 </header>
@@ -53,16 +67,16 @@
 <main>
 	{#if auth.password === null}
 		<form class="card login" onsubmit={submit}>
-			<h1>Log in</h1>
-			<p class="muted">Forgot it? The serial console shows it at every boot.</p>
+			<h1>{m.log_in()}</h1>
+			<p class="muted">{m.login_forgot()}</p>
 			<label>
-				Password
+				{m.password()}
 				<!-- svelte-ignore a11y_autofocus -->
 				<input type="password" bind:value={password} autocomplete="current-password" required autofocus />
 			</label>
-			<label class="check"><input type="checkbox" bind:checked={remember} /> Remember on this device</label>
+			<label class="check"><input type="checkbox" bind:checked={remember} /> {m.remember()}</label>
 			{#if error}<p class="error">{error}</p>{/if}
-			<button disabled={busy}>{busy ? 'Checking…' : 'Log in'}</button>
+			<button disabled={busy}>{busy ? m.checking() : m.log_in()}</button>
 		</form>
 	{:else}
 		{@render children()}
@@ -270,6 +284,23 @@
 		font-weight: 700;
 		text-decoration: none;
 		color: var(--accent);
+	}
+	.start {
+		display: flex;
+		align-items: baseline;
+		gap: 1rem;
+		margin-right: auto;
+	}
+	.lang {
+		display: flex;
+		align-items: baseline;
+		gap: 0.4rem;
+		font-size: 0.8rem;
+	}
+	.lang button[aria-pressed='true'] {
+		color: var(--accent);
+		font-weight: 600;
+		text-decoration: none;
 	}
 	nav {
 		display: flex;

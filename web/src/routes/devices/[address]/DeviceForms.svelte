@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { m } from '#lib/paraglide/messages.js';
 	import { untrack } from 'svelte';
 	import { invalidate } from '$app/navigation';
 	import { goto } from '$app/navigation';
@@ -22,7 +23,7 @@
 	let error = $state('');
 
 	async function forget() {
-		if (!confirm(`Forget ${device.name}? It is unlinked from the others and removed from Home Assistant.`)) return;
+		if (!confirm(m.forget_confirm({ name: device.name }))) return;
 		error = '';
 		try {
 			await del(`/devices/${device.address}`);
@@ -53,49 +54,37 @@
 
 <form
 	class="card"
-	onsubmit={(e) => send(e, { name, room, ...(type && type !== device.type && { type }) }, 'Saved.')}
+	onsubmit={(e) => send(e, { name, room, ...(type && type !== device.type && { type }) }, m.saved())}
 >
-	<h2>Name and room</h2>
+	<h2>{m.name_and_room()}</h2>
 	<div class="grid">
-		<label>Name (MQTT topic) <input bind:value={name} required /></label>
-		<label>Room <input bind:value={room} placeholder="none: not part of heating" /></label>
+		<label>{m.name_mqtt()} <input bind:value={name} required /></label>
+		<label>{m.room()} <input bind:value={room} placeholder={m.room_none()} /></label>
 		{#if !device.type}
 			<!-- Only until the device sends something of its own, which tells the bridge. -->
 			<label>
-				Type
+				{m.type()}
 				<select bind:value={type}>
-					<option value="">not known yet</option>
+					<option value="">{m.not_known_yet()}</option>
 					{#each Object.entries(typeName) as [value, label] (value)}<option {value}>{label}</option>{/each}
 				</select>
 			</label>
 		{/if}
 	</div>
 	{#if !device.type}
-		<p class="muted">
-			The bridge has only heard this device answer others, which does not say what it is. Set the type so it can be
-			linked and, for a radiator thermostat, count for heating.
-		</p>
+		<p class="muted">{m.type_unknown_hint()}</p>
 	{/if}
-	<p class="muted">
-		Devices with a room drive the furnace, get the time from the bridge, and appear in Home Assistant. In a room the
-		bridge links the thermostats and window sensors to each other: radiator thermostats then follow the wall
-		thermostat and close when a window opens. Leave the room empty for devices that are not yours.
-	</p>
+	<p class="muted">{m.room_hint()}</p>
 	<div class="row">
-		<button>Save</button>
-		<button type="button" class="link forget" onclick={forget}>Forget device</button>
+		<button>{m.save()}</button>
+		<button type="button" class="link forget" onclick={forget}>{m.forget_device()}</button>
 		{#if device.room}
 			<button
 				type="button"
 				class="secondary"
-				onclick={(e) =>
-					send(
-						e,
-						{ relink: true },
-						'Sending the room\'s links again. Window sensors get theirs the next time they are opened or closed.'
-					)}
+				onclick={(e) => send(e, { relink: true }, m.relink_sent())}
 			>
-				Re-link room
+				{m.relink_room()}
 			</button>
 		{/if}
 	</div>
@@ -105,35 +94,35 @@
 	<form
 		class="card"
 		onsubmit={(e) =>
-			send(e, mode === 'manual' ? { mode, temperature } : { mode }, 'Sent. The device confirms on its next message.')}
+			send(e, mode === 'manual' ? { mode, temperature } : { mode }, m.control_sent())}
 	>
-		<h2>Control</h2>
+		<h2>{m.control()}</h2>
 		<div class="grid">
 			<label>
-				Mode
+				{m.mode()}
 				<select bind:value={mode}>
-					<option value="auto">Auto (week program)</option>
-					<option value="manual">Manual</option>
-					<option value="boost">Boost</option>
+					<option value="auto">{m.mode_auto_option()}</option>
+					<option value="manual">{m.mode_manual_option()}</option>
+					<option value="boost">{m.mode_boost_option()}</option>
 				</select>
 			</label>
 			{#if mode === 'manual'}
-				<label>Temperature (°C) <input type="number" min="4.5" max="30.5" step="0.5" bind:value={temperature} /></label>
+				<label>{m.temperature_c()} <input type="number" min="4.5" max="30.5" step="0.5" bind:value={temperature} /></label>
 			{/if}
 		</div>
-		<button>Send</button>
+		<button>{m.send()}</button>
 	</form>
 
 	<form
 		class="card"
-		onsubmit={(e) => send(e, { comfort_temperature: comfort, eco_temperature: eco }, 'Sent to the device.')}
+		onsubmit={(e) => send(e, { comfort_temperature: comfort, eco_temperature: eco }, m.sent_to_device())}
 	>
-		<h2>Comfort and eco temperatures</h2>
+		<h2>{m.comfort_eco()}</h2>
 		<div class="grid">
-			<label>Comfort (°C) <input type="number" min="4.5" max="30.5" step="0.5" bind:value={comfort} /></label>
-			<label>Eco (°C) <input type="number" min="4.5" max="30.5" step="0.5" bind:value={eco} /></label>
+			<label>{m.comfort_c()} <input type="number" min="4.5" max="30.5" step="0.5" bind:value={comfort} /></label>
+			<label>{m.eco_c()} <input type="number" min="4.5" max="30.5" step="0.5" bind:value={eco} /></label>
 		</div>
-		<button>Send</button>
+		<button>{m.send()}</button>
 	</form>
 {/if}
 

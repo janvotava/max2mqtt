@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { m } from '#lib/paraglide/messages.js';
 	import { get, post } from '#lib/api.svelte.js';
 
 	interface Calibration {
@@ -49,25 +50,24 @@
 	{#if c?.running || c?.packets.length}
 		<p>
 			{#if c.suggested !== null}
-				Measured <strong>{c.suggested}</strong> ({khz(c.suggested)}) from {c.packets.length} packet{c.packets.length === 1
-					? ''
-					: 's'}{#if c.running}, still listening{/if}.
-				{#if spread > 6}<span class="error">Readings disagree by {spread} steps; wait for more.</span>{/if}
+				{m.measured()} <strong>{c.suggested}</strong> ({khz(c.suggested)}) {m.from_packets({ n: c.packets.length })}{#if c.running},
+					{m.still_listening()}{/if}.
+				{#if spread > 6}<span class="error">{m.readings_disagree({ n: spread })}</span>{/if}
 			{:else}
-				Listening for packets ({c.seconds} s{c.listening_at ? `, searching ${khz(c.listening_at)}` : ''}). Turn a thermostat
-				wheel to send one.
+				{m.listening({ s: c.seconds, searching: c.listening_at ? m.searching({ khz: khz(c.listening_at) }) : '' })}
+				{m.turn_wheel()}
 			{/if}
 		</p>
 	{/if}
 	<div class="row">
 		{#if c?.running}
-			<button type="button" class="secondary" onclick={() => run(false)}>Stop</button>
+			<button type="button" class="secondary" onclick={() => run(false)}>{m.stop()}</button>
 		{:else}
-			<button type="button" class="secondary" onclick={() => run(true)}>{c?.packets.length ? 'Measure again' : 'Measure'}</button>
+			<button type="button" class="secondary" onclick={() => run(true)}>{c?.packets.length ? m.measure_again() : m.measure()}</button>
 		{/if}
 		{#if c && c.suggested !== null && c.suggested !== value}
 			<button type="button" class="link" disabled={!enough} onclick={() => onuse(c!.suggested!)}>
-				Use {c.suggested}{enough ? '' : ' (after 5 packets)'}
+				{m.use_value({ n: c.suggested })}{enough ? '' : m.after_5()}
 			</button>
 		{/if}
 	</div>

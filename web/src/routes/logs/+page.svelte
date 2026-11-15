@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { m } from '#lib/paraglide/messages.js';
 	import { tick } from 'svelte';
 	import { get } from '#lib/api.svelte.js';
 
@@ -46,8 +47,8 @@
 </script>
 
 <div class="row head">
-	<h1>Log</h1>
-	<label class="check"><input type="checkbox" bind:checked={follow} /> Follow</label>
+	<h1>{m.log()}</h1>
+	<label class="check"><input type="checkbox" bind:checked={follow} /> {m.follow()}</label>
 </div>
 {#if error}<p class="error">{error}</p>{/if}
 <pre class="card" bind:this={box}>{#each lines as [n, line] (n)}<span class={level(line)}>{line}</span>

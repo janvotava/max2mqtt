@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { m } from '#lib/paraglide/messages.js';
+	import { getLocale } from '#lib/paraglide/runtime.js';
 	import { invalidate } from '$app/navigation';
 	import { get, post, put, uploadFirmware, waitForBoard } from '#lib/api.svelte.js';
 	import { duration } from '#lib/format.js';
@@ -39,26 +41,25 @@
 		try {
 			backup = JSON.parse(await backupFile.text());
 		} catch {
-			error = 'That file is not JSON.';
+			error = m.not_json();
 			return;
 		}
 		if (backup.format !== 'max2mqtt-backup') {
-			error = 'That file is not a max2mqtt backup.';
+			error = m.not_backup();
 			return;
 		}
 		const devices = backup.config?.devices?.length ?? 0;
 		const wifi = backup.settings?.wifi?.ssid;
 		if (
 			!confirm(
-				`Replace all settings and devices with the backup (${devices} devices${wifi ? `, Wi-Fi "${wifi}"` : ''})? ` +
-					'The board restarts and sends every device its settings again.'
+				m.restore_confirm({ n: devices, wifi: wifi ? m.restore_wifi({ ssid: wifi }) : '' })
 			)
 		)
 			return;
 		busy = true;
 		try {
 			await put('/backup', backup);
-			await afterRestart('Backup restored.');
+			await afterRestart(m.backup_restored());
 		} catch (err) {
 			error = (err as Error).message;
 		} finally {
@@ -66,15 +67,15 @@
 		}
 	}
 	async function afterRestart(what: string) {
-		message = `${what} Restarting…`;
-		message = (await waitForBoard(90)) ? 'Back up.' : 'The board did not come back here.';
+		message = `${what} ${m.restarting_short()}`.trim();
+		message = (await waitForBoard(90)) ? m.back_up() : m.not_back_short();
 		await invalidate('app:status');
 	}
 
 	async function restart(path: '/restart' | '/factory-reset') {
 		if (
 			path === '/factory-reset' &&
-			!confirm('Erase all settings and devices? The board restarts with its setup hotspot and the default password.')
+			!confirm(m.factory_confirm())
 		)
 			return;
 		busy = true;
@@ -99,7 +100,7 @@
 		try {
 			await uploadFirmware(file, (f) => (progress = f));
 			progress = null;
-			await afterRestart('Firmware written.');
+			await afterRestart(m.firmware_written());
 		} catch (err) {
 			error = (err as Error).message;
 			progress = null;
@@ -109,62 +110,59 @@
 	}
 </script>
 
-<h2 class="part" id="board">Board</h2>
+<h2 class="part" id="board">{m.board()}</h2>
 {#if message}<p class="ok">{message}</p>{/if}
 {#if error}<p class="error">{error}</p>{/if}
 
 {#if s}
 	<div class="grid">
 		<div class="card">
-			<h2>Status</h2>
+			<h2>{m.status()}</h2>
 			<dl>
-				<dt>Firmware</dt><dd>max2mqtt {s.system.version}</dd>
-				<dt>Board</dt><dd>{s.system.board}</dd>
-				<dt>Up</dt><dd>{duration(s.system.uptime_seconds)}</dd>
-				<dt>Memory</dt><dd>
-					{Math.round(s.system.heap_used / 1024)} of {Math.round(s.system.heap_size / 1024)} KiB, at most {Math.round(
-						s.system.heap_max / 1024
-					)}
+				<dt>{m.firmware()}</dt><dd>max2mqtt {s.system.version}</dd>
+				<dt>{m.board()}</dt><dd>{s.system.board}</dd>
+				<dt>{m.up()}</dt><dd>{duration(s.system.uptime_seconds)}</dd>
+				<dt>{m.memory()}</dt><dd>
+					{m.memory_value({
+						used: Math.round(s.system.heap_used / 1024),
+						size: Math.round(s.system.heap_size / 1024),
+						max: Math.round(s.system.heap_max / 1024)
+					})}
 				</dd>
 			</dl>
 		</div>
 		<div class="card">
-			<h2>Network</h2>
+			<h2>{m.network()}</h2>
 			<dl>
-				<dt>Wi-Fi</dt><dd>{s.network.station ? `${s.network.ssid}, ${s.network.ip ?? 'no address yet'}` : 'not connected'}</dd>
-				<dt>Hostname</dt><dd>{s.network.hostname}</dd>
-				<dt>Hotspot</dt><dd>{s.network.hotspot ? `on (${s.network.hotspot_ssid})` : 'off'}</dd>
-				<dt>MQTT</dt><dd>{s.network.mqtt_host ? `${s.network.mqtt_host}, ${s.network.mqtt ? 'connected' : 'not connected'}` : 'off'}</dd>
+				<dt>Wi-Fi</dt><dd>{s.network.station ? `${s.network.ssid}, ${s.network.ip ?? m.no_address_yet()}` : m.not_connected()}</dd>
+				<dt>{m.hostname()}</dt><dd>{s.network.hostname}</dd>
+				<dt>{m.hotspot()}</dt><dd>{s.network.hotspot ? m.on_ssid({ ssid: s.network.hotspot_ssid }) : m.off()}</dd>
+				<dt>MQTT</dt><dd>{s.network.mqtt_host ? `${s.network.mqtt_host}, ${s.network.mqtt ? m.connected() : m.not_connected()}` : m.off()}</dd>
 			</dl>
 		</div>
 	</div>
 
 	<form class="card" onsubmit={update}>
-		<h2>Firmware update</h2>
+		<h2>{m.firmware_update()}</h2>
 		<p class="muted">
-			Running from {s.system.firmware_slot} ({s.system.firmware_state}). Build the image with
-			<code>fw-image</code> (C3 Mini) or <code>fw-esp32-image</code> (ESP32). A new image goes back to the previous one
-			by itself if it keeps crashing or cannot get onto the network within 10 minutes.
+			{m.running_from({ slot: s.system.firmware_slot, state: s.system.firmware_state })}
+			<code>fw-image</code> (C3 Mini) {m.or()} <code>fw-esp32-image</code> (ESP32). {m.fw_rollback_hint()}
 		</p>
 		<div class="row">
 			<input type="file" accept=".bin" onchange={(e) => (file = e.currentTarget.files?.[0] ?? null)} disabled={busy} />
-			<button disabled={busy || !file}>Update</button>
+			<button disabled={busy || !file}>{m.update()}</button>
 		</div>
 		{#if progress !== null}
 			<progress max="1" value={progress}></progress>
-			<p class="muted">{progress < 1 ? `Uploading ${Math.round(progress * 100)} %` : 'Writing and checking…'}</p>
+			<p class="muted">{progress < 1 ? m.uploading({ n: Math.round(progress * 100) }) : m.writing()}</p>
 		{/if}
 	</form>
 
 	<form class="card" onsubmit={restore}>
-		<h2>Backup</h2>
-		<p class="muted">
-			One file with all settings and devices: rooms, temperatures, week programs and the radio address they are paired
-			to. It contains the Wi-Fi and MQTT passwords, so keep it private. The device password is not in it: a restore keeps the
-			current one.
-		</p>
+		<h2>{m.backup()}</h2>
+		<p class="muted">{m.backup_hint()}</p>
 		<div class="row">
-			<button type="button" class="secondary" disabled={busy} onclick={download}>Download backup</button>
+			<button type="button" class="secondary" disabled={busy} onclick={download}>{m.download_backup()}</button>
 		</div>
 		<div class="row restore">
 			<input
@@ -173,25 +171,22 @@
 				onchange={(e) => (backupFile = e.currentTarget.files?.[0] ?? null)}
 				disabled={busy}
 			/>
-			<button disabled={busy || !backupFile}>Restore</button>
+			<button disabled={busy || !backupFile}>{m.restore()}</button>
 		</div>
 	</form>
 
 {/if}
 
 <div class="card">
-	<h2>Crashes</h2>
+	<h2>{m.crashes()}</h2>
 	{#if crashes.length}
-		<p class="muted">
-			The board restarted after these. Turn the addresses into source lines with <code>fw-crash</code> and the ELF of
-			that version.
-		</p>
+		<p class="muted">{m.crashes_hint()}</p>
 		<ul class="crashes">
 			{#each crashes.toReversed() as c, k (k)}
 				<li>
 					<div>
-						<strong>{c.time ? new Date(c.time * 1000).toLocaleString() : 'time unknown'}</strong>
-						<span class="muted">· {c.version} · after {duration(c.uptime_seconds)}</span>
+						<strong>{c.time ? new Date(c.time * 1000).toLocaleString(getLocale()) : m.time_unknown()}</strong>
+						<span class="muted">· {c.version} · {m.after({ d: duration(c.uptime_seconds) })}</span>
 					</div>
 					<div class="error">{c.reason}</div>
 					{#if c.backtrace.length}<code>{c.backtrace.join(' ')}</code>{/if}
@@ -203,18 +198,18 @@
 			onclick={async () => {
 				await post('/crashes/clear');
 				await invalidate('app:crashes');
-			}}>Clear</button
+			}}>{m.clear()}</button
 		>
 	{:else}
-		<p class="muted">None recorded. A crash restarts the board and shows up here.</p>
+		<p class="muted">{m.no_crashes()}</p>
 	{/if}
 </div>
 
 <div class="card">
-	<h2>Restart</h2>
+	<h2>{m.restart()}</h2>
 	<div class="row">
-		<button class="secondary" disabled={busy} onclick={() => restart('/restart')}>Restart</button>
-		<button class="danger" disabled={busy} onclick={() => restart('/factory-reset')}>Factory reset</button>
+		<button class="secondary" disabled={busy} onclick={() => restart('/restart')}>{m.restart()}</button>
+		<button class="danger" disabled={busy} onclick={() => restart('/factory-reset')}>{m.factory_reset()}</button>
 	</div>
 </div>
 

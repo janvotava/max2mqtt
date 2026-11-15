@@ -108,7 +108,7 @@ export interface DeviceConfig {
 	associations?: string[];
 	temperatures: Temperatures;
 	/** Unconfirmed settings: "group", "temperatures", { link: address }, { program: day }, … */
-	pending?: (string | Record<string, string>)[];
+	pending?: (string | Record<string, string | string[]>)[];
 	/** Day name to start time ("HH:MM") to °C. */
 	schedule?: Partial<Record<Day, Record<string, number>>>;
 }
