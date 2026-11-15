@@ -56,8 +56,11 @@ impl Outgoing {
     /// Messages that a newer one makes obsolete if neither has been sent yet.
     fn supersedes(&self, other: &Outgoing) -> bool {
         let (a, b) = (&self.frame, &other.frame);
+        // Setting and removing the group id are one setting: the newer replaces either, or
+        // set, remove, set could go out as set, remove and leave the device without a group.
+        let group = |c| c == command::SET_GROUP_ID || c == command::REMOVE_GROUP_ID;
         a.dst == b.dst
-            && a.command == b.command
+            && (a.command == b.command || (group(a.command) && group(b.command)))
             && match a.command {
                 // One schedule message per day and part.
                 command::CONFIG_WEEK_PROFILE => a.payload.first() == b.payload.first(),
@@ -462,6 +465,19 @@ mod tests {
         q.push(Outgoing::command(frame(3, command::CONFIG_WEEK_PROFILE, vec![0])));
         q.push(Outgoing::command(frame(4, command::CONFIG_WEEK_PROFILE, vec![1])));
         assert_eq!(q.len(), 3);
+    }
+
+    #[test]
+    fn group_set_and_remove_replace_each_other() {
+        let mut q = TxQueue::new(false, 0);
+        q.push(Outgoing::command(frame(1, command::SET_GROUP_ID, vec![3])));
+        q.push(Outgoing::command(frame(2, command::REMOVE_GROUP_ID, vec![0])));
+        q.push(Outgoing::command(frame(3, command::SET_GROUP_ID, vec![1])));
+        assert_eq!(q.len(), 1, "only the latest group goes out");
+        match q.next(0, &mut vec![]) {
+            Next::Send { bytes, .. } => assert_eq!((bytes[3], bytes[11]), (command::SET_GROUP_ID, 1)),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]
