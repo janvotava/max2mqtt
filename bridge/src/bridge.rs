@@ -122,6 +122,10 @@ pub struct Runtime {
     resent_at: Option<Millis>,
     /// `heating` as last published, to publish again when it changes.
     heating_sent: Option<bool>,
+    /// Stale partners this device has been told to drop since the bridge started.
+    dropped_links: BTreeSet<Address>,
+    /// The device was sent its group again after using another one, since start.
+    group_fixed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -412,7 +416,7 @@ impl Bridge {
     }
 
     /// Queue a command with the device's group in the header (FHEM does this for
-    /// SetTemperature).
+    /// SetTemperature): every device in the group takes it at once.
     fn send_grouped(&mut self, i: usize, command: u8, payload: Vec<u8>) {
         let (dst, group) = (self.devices[i].cfg.address, self.devices[i].cfg.group);
         let flags = if group != 0 { FLAG_GROUP } else { 0 };
@@ -845,6 +849,13 @@ impl Bridge {
                 Err(_) => log::warn!("{name}: unknown device type {t}"),
             }
         }
+        // Factory reset over the radio: the device forgets its pairing, links, group and
+        // settings. Its entry here stays; holding boost on it pairs it again, and a device
+        // with a room then gets everything back (see PairPing in `handle_radio`).
+        if obj.get("factory_reset").and_then(Value::as_bool) == Some(true) {
+            log::warn!("{name}: factory reset");
+            self.send(self.devices[i].cfg.address, command::RESET, Vec::new());
+        }
         // Remove a link the device still has to something the bridge no longer knows (a
         // forgotten window sensor whose unlink never arrived): it keeps trying to reach it
         // and reports a radio error. `{"unlink": {"address": "0FB714", "type": "shutter_contact"}}`.
@@ -1233,17 +1244,20 @@ impl Bridge {
         };
         let sender_type = self.find(f.src).and_then(|i| self.devices[i].cfg.device_type);
         log::info!(
-            "RX {} -> {} #{} {} dBm: {}",
+            "RX {} -> {} #{}{} {} dBm: {}",
             who(f.src),
             who(f.dst),
             f.msgcnt,
+            // The group the sender puts in its header: what it holds, whatever we sent it.
+            if f.group != 0 { format!(" g{}", f.group) } else { String::new() },
             rx.rssi_dbm,
-            msg.describe(sender_type)
-                + &if matches!(msg, Message::Unknown | Message::Malformed) {
-                    format!(" (command {:#04x}, {:02X?})", f.command, f.payload)
-                } else {
-                    String::new()
-                }
+            match msg {
+                // Not decoded, but maybe known by name (wake up, reset...).
+                Message::Unknown => format!("{} ({:#04x}, {:02X?})", command::name(f.command), f.command, f.payload),
+                Message::Malformed =>
+                    format!("{} (command {:#04x}, {:02X?})", msg.describe(sender_type), f.command, f.payload),
+                _ => msg.describe(sender_type),
+            }
         );
 
         let (i, is_new) = match self.find(f.src) {
@@ -1264,6 +1278,8 @@ impl Bridge {
         };
         self.devices[i].rt.last_seen = Some(now);
         self.devices[i].rt.rssi = Some(rx.rssi_dbm);
+        self.drop_stale_link(i, &f, &msg);
+        self.fix_group(i, &f);
 
         match msg {
             Message::PairPing { device_type, .. } => {
@@ -1761,6 +1777,48 @@ impl Bridge {
             .filter(|o| d.is_heater().then_some(o.cfg.address).is_none_or(|a| a == d.cfg.address))
             .filter_map(|o| o.rt.valve.filter(|v| self.now.saturating_sub(v.at) <= stale).map(|v| v.value))
             .max()
+    }
+
+    /// A device of ours sending to a device that is not its partner still holds a link the
+    /// bridge does not know about: left from another controller, or from a room change whose
+    /// unlink got lost. It keeps trying to reach that partner and reports a radio error
+    /// (a radiator called a hallway radiator every 10 s). Tell it to drop the link, once
+    /// per partner since start; the unlink is tracked until confirmed, a rejection included.
+    fn drop_stale_link(&mut self, i: usize, f: &Frame, msg: &Message) {
+        let d = &self.devices[i];
+        let partner_talk = !matches!(
+            msg,
+            Message::Ack { .. } | Message::TimeRequest | Message::TimeInformation | Message::PairPing { .. }
+        );
+        if !partner_talk
+            || f.dst == self.settings.address
+            || f.dst.is_broadcast()
+            || d.cfg.room.is_none()
+            || d.cfg.associations.contains(&f.dst)
+            || d.rt.dropped_links.contains(&f.dst)
+        {
+            return;
+        }
+        // The unlink names the partner's type, so only partners the bridge knows.
+        let Some(t) = self.find(f.dst).and_then(|j| self.devices[j].cfg.device_type) else { return };
+        log::warn!("{} still talks to {}, which is not its partner: unlinking", d.cfg.name, f.dst);
+        self.devices[i].rt.dropped_links.insert(f.dst);
+        self.send(f.src, command::REMOVE_LINK_PARTNER, payload::link_partner(f.dst, t));
+    }
+
+    /// A device puts the group it holds in the header of what it sends. One in a room using
+    /// another group than its room's (left from a room change, or from another controller)
+    /// takes commands meant for that other group: a bathroom boost boosted a bedroom. Send
+    /// it its group again, once since start; it is tracked until confirmed.
+    fn fix_group(&mut self, i: usize, f: &Frame) {
+        let d = &self.devices[i];
+        let want = d.cfg.group;
+        if f.group == 0 || want == 0 || f.group == want || d.cfg.room.is_none() || d.rt.group_fixed {
+            return;
+        }
+        log::warn!("{} uses group {}, its room's is {want}: sending it again", d.cfg.name, f.group);
+        self.devices[i].rt.group_fixed = true;
+        self.send(f.src, command::SET_GROUP_ID, payload::set_group(want));
     }
 
     /// A device's mode. A wall thermostat's broadcasts carry no mode, so after a restart it
@@ -2503,6 +2561,64 @@ mod tests {
         let s = sent(&drain(&mut b, 3));
         assert!(s.contains(&(HT, command::SET_GROUP_ID, payload::set_group(6))));
         assert!(b.devices[i].cfg.pending.is_empty());
+    }
+
+    #[test]
+    fn device_talking_to_a_stranger_is_told_to_drop_it() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        // A radiator elsewhere, known to the bridge.
+        b.handle_radio(&rx(NEIGHBOUR, ME, 1, command::THERMOSTAT_STATE, vec![0x01, 0, 42, 0, 200]), ctx(0));
+        drain(&mut b, 0);
+        // The living room radiator still wakes it up, from an old link.
+        let wake = rx(HT, NEIGHBOUR, 7, command::WAKE_UP, vec![0x03]);
+        b.handle_radio(&wake, ctx(1_000));
+        let s = sent(&drain(&mut b, 1_000));
+        let unlink = payload::link_partner(NEIGHBOUR, DeviceType::HeatingThermostat);
+        assert_eq!(s, vec![(HT, command::REMOVE_LINK_PARTNER, unlink)]);
+        // Once: not again on its next try, nor for its real partner.
+        b.handle_radio(&wake, ctx(2_000));
+        b.handle_radio(&rx(WT, HT, 8, command::WALL_THERMOSTAT_CONTROL, vec![44, 210]), ctx(3_000));
+        assert!(drain(&mut b, 3_000).iter().all(|f| f.command != command::REMOVE_LINK_PARTNER));
+    }
+
+    #[test]
+    fn device_using_another_group_gets_its_own_again() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        drain(&mut b, 0);
+        let hi = b.find(HT).unwrap();
+        let mine = b.devices[hi].cfg.group;
+        assert_ne!(mine, 0);
+        // The radiator's own message, with another room's group in the header.
+        let mut raw = Frame {
+            msgcnt: 9,
+            flags: FLAG_GROUP,
+            command: command::THERMOSTAT_STATE,
+            src: HT,
+            dst: Address([0; 3]),
+            group: mine + 3,
+            payload: vec![0x01, 0, 42, 0, 200],
+        }
+        .encode();
+        raw.extend_from_slice(&[0x10, 0x80]);
+        b.handle_radio(&raw, ctx(1_000));
+        let s = sent(&drain(&mut b, 1_000));
+        assert_eq!(s, vec![(HT, command::SET_GROUP_ID, payload::set_group(mine))]);
+        // Once since start, so a device that keeps the wrong one is not flooded.
+        b.handle_radio(&raw, ctx(2_000));
+        assert!(drain(&mut b, 2_000).is_empty());
+    }
+
+    #[test]
+    fn factory_reset_over_the_radio() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        drain(&mut b, 0);
+        b.configure_device(HT, &json!({"factory_reset": true}), ctx(1)).unwrap();
+        assert_eq!(sent(&drain(&mut b, 1)), vec![(HT, command::RESET, vec![])]);
+        // Still known, room and all, for pairing it again.
+        assert!(b.find(HT).is_some_and(|i| b.devices[i].cfg.room.is_some()));
     }
 
     #[test]

@@ -396,8 +396,24 @@ async fn handle(app: &App, on_hotspot: bool, req: Request) -> (Response, Option<
         ("GET", "/logs") => {
             let after = req.query.split('&').find_map(|kv| kv.strip_prefix("after=")).and_then(|v| v.parse().ok());
             let (lines, last) = crate::logger::lines_after(after.unwrap_or(0));
-            let lines: Vec<Value> = lines.into_iter().map(|(n, l)| json!([n, l])).collect();
-            Ok((Response::ok(json!({ "last": last, "lines": lines })), None))
+            // Straight to text: as a JSON tree, the log took several times its size (it was
+            // the highest heap use of all requests).
+            #[derive(serde::Serialize)]
+            struct Logs {
+                last: u32,
+                lines: Vec<(u32, String)>,
+            }
+            let body = serde_json::to_vec(&Logs { last, lines }).unwrap_or_default();
+            Ok((
+                Response {
+                    status: 200,
+                    content_type: "application/json",
+                    gzip: false,
+                    location: None,
+                    body: Body::Owned(body),
+                },
+                None,
+            ))
         }
         ("PUT", "/backup") => restore(app, &req.body).await,
         ("POST", "/bridge") => bridge(&req.body).await,
