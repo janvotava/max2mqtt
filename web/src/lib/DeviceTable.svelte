@@ -45,7 +45,7 @@
 						{/if}
 					</td>
 					<td class="muted heard">
-						{ago(d.seen_seconds_ago)}{#if d.rssi !== undefined}<span class="dbm"> · {d.rssi} dBm</span>{/if}
+						{ago(d.seen_seconds_ago)}{#if d.rssi !== undefined}{' '}<span class="dbm">· {d.rssi} dBm</span>{/if}
 					</td>
 				</tr>
 			{/each}
