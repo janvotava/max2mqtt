@@ -17,7 +17,7 @@
 //!   discovery, see [`crate::homeassistant`]. Republished when Home Assistant sends
 //!   `online` on `homeassistant/status`.
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -29,14 +29,14 @@ use serde_json::{Map, Value};
 use crate::Millis;
 use crate::address::{Address, hex};
 use crate::clock::{LocalTime, TimeZone, Weekday, local_time};
-use crate::config::{Config, DeviceConfig, HeatingConfig, Pending};
+use crate::config::{Config, DayProgram, DeviceConfig, HeatingConfig, Pending};
 use crate::heating::{Burner, Demand, boost_active, valve_demand};
 use crate::homeassistant::Discovery;
 use crate::protocol::{
     DeviceType, FLAG_GROUP, Frame, Message, Mode, Status, TEMPERATURE_MAX, TEMPERATURE_MIN, ThermostatState, Until,
     WallThermostatState, command, decode_rx, parse, parse_thermostat_state, parse_wall_thermostat_state, payload,
 };
-use crate::schedule::{DaySchedule, format_time, parse_time};
+use crate::schedule::{DaySchedule, parse_time};
 use crate::tx::{Event, Next, Outgoing, TxId, TxQueue};
 
 pub const OFFLINE_PAYLOAD: &str = r#"{"availability":"offline"}"#;
@@ -299,6 +299,28 @@ impl Bridge {
         serde_json::to_string(&self.config()).unwrap_or_default()
     }
 
+    /// The config as JSON in pieces, for sending without holding all of it in memory:
+    /// what comes before the device list, and after it. The devices go in between, comma
+    /// separated, from [`Self::device_json`].
+    pub fn config_json_around_devices(&self) -> (String, String) {
+        // `settings` holds everything but the devices, which live in `self.devices`.
+        let json = serde_json::to_string(&self.settings).unwrap_or_default();
+        const LIST: &str = "\"devices\":[]";
+        match json.find(LIST) {
+            Some(at) => (json[..at + LIST.len() - 1].into(), json[at + LIST.len() - 1..].into()),
+            None => (json, String::new()),
+        }
+    }
+
+    pub fn device_count(&self) -> usize {
+        self.devices.len()
+    }
+
+    /// Device `k`'s stored settings as JSON.
+    pub fn device_json(&self, k: usize) -> Option<String> {
+        self.devices.get(k).and_then(|d| serde_json::to_string(&d.cfg).ok())
+    }
+
     pub fn topics(&self) -> &Topics {
         &self.topics
     }
@@ -505,8 +527,7 @@ impl Bridge {
 
     fn program_parts(&self, i: usize, day: Weekday) -> usize {
         let Some(stored) = self.devices[i].cfg.schedule.get(&day) else { return 1 };
-        let entries = stored.iter().filter_map(|(t, &c)| parse_time(t).ok().map(|m| (m, c)));
-        DaySchedule::from_start_times(entries).map_or(1, |s| s.payloads(day.max_index()).len())
+        DaySchedule::from_start_times(stored.entries()).map_or(1, |s| s.payloads(day.max_index()).len())
     }
 
     /// Everything a device in a room should have, as unconfirmed.
@@ -1046,8 +1067,7 @@ impl Bridge {
             log::warn!("{}: {}: {e}", self.devices[i].cfg.name, day.name());
             return;
         }
-        let stored: BTreeMap<String, f32> = entries.iter().map(|&(m, t)| (format_time(m), t)).collect();
-        self.devices[i].cfg.schedule.insert(day, stored);
+        self.devices[i].cfg.schedule.insert(day, DayProgram::new(entries));
         self.mark_dirty(now);
         self.send_schedule_day(i, day);
     }
@@ -1076,8 +1096,7 @@ impl Bridge {
 
     fn send_schedule_day(&mut self, i: usize, day: Weekday) {
         let Some(stored) = self.devices[i].cfg.schedule.get(&day) else { return };
-        let entries = stored.iter().filter_map(|(t, &c)| parse_time(t).ok().map(|m| (m, c)));
-        match DaySchedule::from_start_times(entries) {
+        match DaySchedule::from_start_times(stored.entries()) {
             Ok(s) => {
                 let dst = self.devices[i].cfg.address;
                 for p in s.payloads(day.max_index()) {
@@ -1744,6 +1763,23 @@ impl Bridge {
             .max()
     }
 
+    /// A device's mode. A wall thermostat's broadcasts carry no mode, so after a restart it
+    /// is unknown until the thermostat sends its full state; its radiators follow it and say
+    /// it in theirs, so take theirs until then.
+    fn mode(&self, i: usize) -> Option<Mode> {
+        let d = &self.devices[i];
+        d.rt.mode.map(|m| m.value).or_else(|| {
+            (d.cfg.device_type == Some(DeviceType::WallThermostat) && d.cfg.room.is_some())
+                .then(|| {
+                    self.devices
+                        .iter()
+                        .filter(|o| o.is_heater() && o.cfg.room == d.cfg.room)
+                        .find_map(|o| o.rt.mode.map(|m| m.value))
+                })
+                .flatten()
+        })
+    }
+
     /// What Home Assistant shows as "heating": the burner is on, and this thermostat's room
     /// (for a radiator: the radiator itself) calls for heat. An open valve alone is not
     /// heating between burner cycles, nor is one whose reading went stale.
@@ -1767,7 +1803,7 @@ impl Bridge {
             address: d.cfg.address,
             device_type: d.cfg.device_type.map(DeviceType::as_str),
             room: d.cfg.room.as_deref(),
-            mode: d.rt.mode.map(|m| m.value.as_str()),
+            mode: self.mode(i).map(Mode::as_str),
             measured_temperature: d.rt.measured.map(|t| round1(t.value)),
             desired_temperature: d.rt.desired.map(|t| round1(t.value)),
             valve_position: valve,
@@ -2217,7 +2253,7 @@ mod tests {
         assert_eq!(sent[0].command, command::CONFIG_WEEK_PROFILE);
         assert_eq!(sent[0].payload[0], 2);
         let stored = &b.devices[0].cfg.schedule[&Weekday::Monday];
-        assert_eq!(stored.keys().collect::<Vec<_>>(), vec!["06:00", "22:30"]);
+        assert_eq!(stored.entries().collect::<Vec<_>>(), vec![(6 * 60, 21.5), (22 * 60 + 30, 4.5)]);
 
         web(&mut b, "max/0A0001/set", json!({"day": "funday", "schedule": {"6:00": 21.5}}), 0);
         assert!(drain(&mut b, 0).is_empty());
@@ -2400,6 +2436,34 @@ mod tests {
         b.send_pending(wt, 1);
         drain(&mut b, 1);
         assert!(b.devices[wt].cfg.pending.is_empty(), "{:?}", b.devices[wt].cfg.pending);
+    }
+
+    #[test]
+    fn wall_thermostat_takes_its_radiators_mode_until_it_reports_one() {
+        let mut b = Bridge::new(Config { duty_cycle_limit: false, ..Config::default() }, Topics::default(), 0);
+        living_room(&mut b, 0);
+        let mut c = b.config();
+        c.tracking = true;
+        let mut b = Bridge::new(c, Topics::default(), 0);
+        let wt = b.find(WT).unwrap();
+        assert_eq!(b.mode(wt), None);
+        // A broadcast to its radiator: temperatures only.
+        b.handle_radio(&rx(WT, HT, 5, command::WALL_THERMOSTAT_CONTROL, vec![44, 210]), ctx(1_000));
+        assert_eq!(b.mode(wt), None);
+        b.handle_radio(&rx(HT, ME, 6, command::THERMOSTAT_STATE, vec![0x01, 50, 44, 0, 200]), ctx(2_000));
+        assert_eq!(b.mode(wt), Some(Mode::Manual));
+    }
+
+    #[test]
+    fn config_in_pieces_is_the_whole_config() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        let (head, tail) = b.config_json_around_devices();
+        let devices: Vec<String> = (0..b.device_count()).filter_map(|k| b.device_json(k)).collect();
+        let pieced = format!("{head}{}{tail}", devices.join(","));
+        let a: Value = serde_json::from_str(&pieced).unwrap();
+        let whole: Value = serde_json::from_str(&b.config_json()).unwrap();
+        assert_eq!(a, whole);
     }
 
     #[test]

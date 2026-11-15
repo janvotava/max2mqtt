@@ -90,6 +90,53 @@ impl Default for HeatingConfig {
     }
 }
 
+/// One day's switch points: start minute and °C, in start order. Kept as minute and half
+/// degrees, 3 bytes a point: as a map from `"HH:MM"` strings they took several times that,
+/// for every device. Stored and sent as that map all the same, `{"06:00": 21.5, ...}`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "BTreeMap<String, f32>", into = "BTreeMap<String, f32>")]
+pub struct DayProgram(Vec<(u16, u8)>);
+
+impl DayProgram {
+    /// From (start minute, °C) in any order; a later point at the same minute wins.
+    pub fn new(entries: impl IntoIterator<Item = (u16, f32)>) -> Self {
+        let mut points: Vec<(u16, u8)> =
+            entries.into_iter().map(|(minute, celsius)| (minute, crate::protocol::half_degrees(celsius))).collect();
+        points.reverse();
+        points.sort_by_key(|p| p.0);
+        points.dedup_by_key(|p| p.0);
+        points.shrink_to_fit();
+        DayProgram(points)
+    }
+
+    /// (start minute, °C), in start order.
+    pub fn entries(&self) -> impl Iterator<Item = (u16, f32)> + '_ {
+        self.0.iter().map(|&(minute, half)| (minute, half as f32 / 2.0))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl TryFrom<BTreeMap<String, f32>> for DayProgram {
+    type Error = String;
+
+    fn try_from(map: BTreeMap<String, f32>) -> Result<Self, String> {
+        let mut entries = Vec::with_capacity(map.len());
+        for (time, celsius) in map {
+            entries.push((crate::schedule::parse_time(&time).map_err(|e| alloc::format!("{e}"))?, celsius));
+        }
+        Ok(DayProgram::new(entries))
+    }
+}
+
+impl From<DayProgram> for BTreeMap<String, f32> {
+    fn from(p: DayProgram) -> Self {
+        p.entries().map(|(minute, celsius)| (crate::schedule::format_time(minute), celsius)).collect()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DeviceConfig {
@@ -106,9 +153,9 @@ pub struct DeviceConfig {
     pub display_actual_temperature: Option<bool>,
     pub temperatures: Temperatures,
     pub valve: ValveConfig,
-    /// Start time `"HH:MM"` to °C, per day. See [`crate::schedule`].
+    /// Switch points per day. See [`crate::schedule`].
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub schedule: BTreeMap<Weekday, BTreeMap<String, f32>>,
+    pub schedule: BTreeMap<Weekday, DayProgram>,
     /// Settings sent to the device that it has not acknowledged yet. Stored, so they are
     /// sent again after a restart, and when the device is next heard.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
@@ -219,7 +266,7 @@ mod tests {
             DeviceConfig { address: Address([1, 2, 3]), name: "living-room/heater".into(), ..Default::default() };
         d.room = Some("living-room".into());
         d.device_type = Some(DeviceType::HeatingThermostat);
-        d.schedule.insert(Weekday::Monday, [("06:00".into(), 21.5)].into_iter().collect());
+        d.schedule.insert(Weekday::Monday, DayProgram::new([(6 * 60, 21.5)]));
         c.devices.push(d);
         let json = serde_json::to_string(&c).unwrap();
         assert!(json.contains("\"monday\":{\"06:00\":21.5}"), "{json}");

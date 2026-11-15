@@ -71,26 +71,50 @@ pub async fn web_task(stack: Stack<'static>, on_hotspot: bool, app: &'static App
         if on_hotspot {
             hotspot_used();
         }
+        let mut path = String::new();
         let (response, after) = match with_timeout(Duration::from_secs(10), read_request(&mut socket)).await {
+            // Written piece by piece as they are produced: built whole first, they took up to
+            // twice their size in memory.
+            Ok(Ok(request))
+                if request.method == "GET"
+                    && (request.path == "/api/config" || request.path == "/api/backup")
+                    && authorized(app, request.authorization.as_deref()) =>
+            {
+                path = request.path.clone();
+                if let Err(e) = stream_config(&mut socket, app, request.path == "/api/backup").await {
+                    log::debug!("HTTP write failed: {e:?}");
+                }
+                (None, None)
+            }
             Ok(Ok(request)) if request.method == "POST" && request.path == "/api/firmware" => {
                 if !authorized(app, request.authorization.as_deref()) {
                     Timer::after_millis(500).await;
-                    (Response::error(401, "wrong password"), None)
+                    (Some(Response::error(401, "wrong password")), None)
                 } else {
                     match ota::receive(&mut socket, &request.body, request.length, app.store).await {
-                        Ok(()) => (Response::ok(json!({ "ok": true, "restarting": true })), Some(SystemCmd::Restart)),
+                        Ok(()) => {
+                            (Some(Response::ok(json!({ "ok": true, "restarting": true }))), Some(SystemCmd::Restart))
+                        }
                         Err(e) => {
                             log::warn!("Firmware upload failed: {e}");
-                            (Response::error(400, &e), None)
+                            (Some(Response::error(400, &e)), None)
                         }
                     }
                 }
             }
-            Ok(Ok(request)) => handle(app, on_hotspot, request).await,
-            Ok(Err(status)) => (Response::error(status, "bad request"), None),
-            Err(_) => (Response::error(408, "timeout"), None),
+            Ok(Ok(request)) => {
+                path = request.path.clone();
+                let (r, after) = handle(app, on_hotspot, request).await;
+                (Some(r), after)
+            }
+            Ok(Err(status)) => (Some(Response::error(status, "bad request")), None),
+            Err(_) => (Some(Response::error(408, "timeout")), None),
         };
-        if let Err(e) = response.write(&mut socket).await {
+        // The request and its response are both in memory here.
+        crate::heap::note(&path);
+        if let Some(response) = response
+            && let Err(e) = response.write(&mut socket).await
+        {
             log::debug!("HTTP write failed: {e:?}");
         }
         let _ = socket.flush().await;
@@ -375,31 +399,6 @@ async fn handle(app: &App, on_hotspot: bool, req: Request) -> (Response, Option<
             let lines: Vec<Value> = lines.into_iter().map(|(n, l)| json!([n, l])).collect();
             Ok((Response::ok(json!({ "last": last, "lines": lines })), None))
         }
-        ("GET", "/config") => {
-            let json = with_bridge(|b| b.config_json()).await;
-            let r = Response {
-                status: 200,
-                content_type: "application/json",
-                gzip: false,
-                location: None,
-                body: Body::Owned(json.into_bytes()),
-            };
-            Ok((r, None))
-        }
-        ("GET", "/backup") => {
-            let config = with_bridge(|b| b.config()).await;
-            let backup = Backup::new(app.settings.clone(), config, env!("CARGO_PKG_VERSION"));
-            Ok((
-                Response {
-                    status: 200,
-                    content_type: "application/json",
-                    gzip: false,
-                    location: None,
-                    body: Body::Owned(backup.to_json().into_bytes()),
-                },
-                None,
-            ))
-        }
         ("PUT", "/backup") => restore(app, &req.body).await,
         ("POST", "/bridge") => bridge(&req.body).await,
         ("POST", "/restart") => Ok((Response::ok(json!({ "ok": true })), Some(SystemCmd::Restart))),
@@ -481,6 +480,43 @@ async fn restore(app: &App, body: &[u8]) -> Handled {
     with_bridge(|b| *b = Bridge::new(backup.config, topics, Instant::now().as_millis())).await;
     log::warn!("Restored a backup ({devices} devices, from firmware {}), restarting", backup.firmware);
     Ok((Response::ok(json!({ "ok": true, "restarting": true })), Some(SystemCmd::Restart)))
+}
+
+/// `GET /api/config`, or with `backup` `GET /api/backup` (the same as [`Backup`] writes it),
+/// one device at a time. No Content-Length: the connection closes at the end.
+async fn stream_config(socket: &mut TcpSocket<'_>, app: &App, backup: bool) -> Result<(), embassy_net::tcp::Error> {
+    socket
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n")
+        .await?;
+    if backup {
+        let mut settings = app.settings.clone();
+        // Not in backups: a restore keeps the board's own.
+        settings.password.clear();
+        let start = format!(
+            "{{\"format\":\"{}\",\"version\":{},\"firmware\":\"{}\",\"settings\":{},\"config\":",
+            max2mqtt_bridge::backup::FORMAT,
+            max2mqtt_bridge::backup::VERSION,
+            env!("CARGO_PKG_VERSION"),
+            settings.to_json()
+        );
+        socket.write_all(start.as_bytes()).await?;
+    }
+    let (head, tail) = with_bridge(|b| b.config_json_around_devices()).await;
+    socket.write_all(head.as_bytes()).await?;
+    drop(head);
+    let mut k = 0;
+    while let Some(device) = with_bridge(|b| b.device_json(k)).await {
+        if k > 0 {
+            socket.write_all(b",").await?;
+        }
+        socket.write_all(device.as_bytes()).await?;
+        k += 1;
+    }
+    socket.write_all(tail.as_bytes()).await?;
+    if backup {
+        socket.write_all(b"}").await?;
+    }
+    Ok(())
 }
 
 async fn scan() -> Response {

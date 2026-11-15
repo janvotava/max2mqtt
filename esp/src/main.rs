@@ -15,6 +15,7 @@ extern crate alloc;
 mod board;
 mod cc1101;
 mod crash;
+mod heap;
 mod logger;
 mod mqtt;
 mod net;
@@ -75,6 +76,7 @@ async fn main(spawner: Spawner) -> ! {
     let timg0 = TimerGroup::new(p.TIMG0);
     esp_rtos::start(timg0.timer0, p.FROM_CPU_INTR0);
     log::info!("max2mqtt {} starting on {}", env!("CARGO_PKG_VERSION"), board::NAME);
+    heap::step("start");
 
     // Burner off until the bridge decides otherwise.
     let relay = Output::new(pins.relay, Level::Low, OutputConfig::default());
@@ -142,6 +144,7 @@ async fn main(spawner: Spawner) -> ! {
         discovery: settings.mqtt.homeassistant.then(|| settings.mqtt.discovery_prefix.clone()),
     };
     *BRIDGE.lock().await = Some(Bridge::new(config, topics, Instant::now().as_millis()));
+    heap::step("loading settings and devices");
 
     let spi = Spi::new(p.SPI2, SpiConfig::default().with_frequency(Rate::from_mhz(4)))
         .expect("SPI config")
@@ -154,6 +157,7 @@ async fn main(spawner: Spawner) -> ! {
     let radio = cc1101::Cc1101::new(spi, cs, settings.cc1101_freq_offset);
 
     let net = net::start(&spawner, p.WIFI, settings);
+    heap::step("starting Wi-Fi");
     let mac = net.mac;
     static CLIENT_ID: StaticCell<String> = StaticCell::new();
     let client_id = CLIENT_ID.init(format!("max-{:02x}{:02x}{:02x}", mac[3], mac[4], mac[5]));
@@ -180,6 +184,9 @@ async fn main(spawner: Spawner) -> ! {
     for _ in 0..2 {
         spawner.spawn(web::web_task(net.hotspot, true, app).unwrap());
     }
+    // The tasks allocate their buffers when they first run.
+    Timer::after_secs(5).await;
+    heap::step("starting the tasks (web, MQTT, radio)");
 
     loop {
         Timer::after_secs(3600).await;
