@@ -481,6 +481,18 @@ impl Bridge {
     /// `dst` acknowledged a setting: it is no longer pending.
     fn confirm(&mut self, dst: Address, command: u8, payload: &[u8]) {
         let (Some(i), Some(p)) = (self.find(dst), pending_item(command, payload)) else { return };
+        // The ACK of an older value does not confirm a newer one queued after it: with a
+        // group changed twice in a row, the first ACK used to leave the device on the
+        // first group for good.
+        let current = match p {
+            Pending::Group => payload == payload::set_group(self.devices[i].cfg.group).as_slice(),
+            Pending::Temperatures => payload == self.temperatures_payload(i).as_slice(),
+            Pending::Valve => payload == self.valve_payload(i).as_slice(),
+            _ => true,
+        };
+        if !current {
+            return;
+        }
         // A week day in two messages is confirmed with its second one.
         if let Pending::Program(day) = p {
             let second = payload.first().is_some_and(|b| b & 0x10 != 0);
@@ -1076,9 +1088,9 @@ impl Bridge {
         }
     }
 
-    fn send_temperatures(&mut self, i: usize) {
-        let t = self.devices[i].cfg.temperatures.clone();
-        let p = payload::config_temperatures(
+    fn temperatures_payload(&self, i: usize) -> Vec<u8> {
+        let t = &self.devices[i].cfg.temperatures;
+        payload::config_temperatures(
             t.comfort,
             t.eco,
             t.max,
@@ -1086,20 +1098,28 @@ impl Bridge {
             t.measurement_offset,
             t.window_open,
             t.window_open_minutes,
-        );
+        )
+    }
+
+    fn send_temperatures(&mut self, i: usize) {
+        let p = self.temperatures_payload(i);
         self.send(self.devices[i].cfg.address, command::CONFIG_TEMPERATURES, p);
     }
 
-    fn send_valve(&mut self, i: usize) {
-        let v = self.devices[i].cfg.valve.clone();
-        let p = payload::config_valve(
+    fn valve_payload(&self, i: usize) -> Vec<u8> {
+        let v = &self.devices[i].cfg.valve;
+        payload::config_valve(
             v.boost_minutes,
             v.boost_valve_position,
             v.decalc_day,
             v.decalc_hour,
             v.max_valve_setting,
             v.valve_offset,
-        );
+        )
+    }
+
+    fn send_valve(&mut self, i: usize) {
+        let p = self.valve_payload(i);
         self.send(self.devices[i].cfg.address, command::CONFIG_VALVE, p);
     }
 
@@ -2395,6 +2415,30 @@ mod tests {
         let mut c = b.config();
         c.heating.min_on_minutes = f32::NAN;
         assert_eq!(Bridge::new(c, Topics::default(), 0).config().heating, HeatingConfig::default());
+    }
+
+    #[test]
+    fn ack_of_an_older_group_does_not_confirm_the_newer_one() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        drain(&mut b, 0);
+        b.configure_device(HT, &json!({"group": 3}), ctx(1)).unwrap();
+        let Next::Send { id, bytes, .. } = b.next_tx(ctx(1)) else { panic!() };
+        b.transmitted(id, 1);
+        // Changed again before the device answered the first.
+        b.configure_device(HT, &json!({"group": 6}), ctx(2)).unwrap();
+        let mut raw = bytes.clone();
+        raw.extend_from_slice(&[0, 0x80]);
+        let f = decode_rx(&raw).unwrap().frame;
+        assert_eq!(f.payload, payload::set_group(3));
+        let mut events = Vec::new();
+        b.tx.ack(HT, f.msgcnt, true, &mut events);
+        b.log_events(events);
+        let i = b.find(HT).unwrap();
+        assert!(b.devices[i].cfg.pending.contains(&Pending::Group), "group 6 still to confirm");
+        let s = sent(&drain(&mut b, 3));
+        assert!(s.contains(&(HT, command::SET_GROUP_ID, payload::set_group(6))));
+        assert!(b.devices[i].cfg.pending.is_empty());
     }
 
     #[test]
