@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "max2mqtt") (type "KiCad") (uri "${KIPRJMOD}/max2mqtt.pretty") (options "") (descr "Footprints of this board"))
+)

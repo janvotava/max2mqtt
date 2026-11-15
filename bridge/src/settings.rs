@@ -20,7 +20,7 @@ pub struct Settings {
     pub wifi: WifiSettings,
     pub mqtt: MqttSettings,
     pub ntp_server: String,
-    /// CC1101 crystal correction in steps of 1.587 kHz. See docs/cc1101-shield.md.
+    /// CC1101 crystal correction in steps of 1.587 kHz. See hardware/cc1101-shield/troubleshooting.md.
     pub cc1101_freq_offset: i8,
 }
 

@@ -12,3 +12,8 @@ devenv.local.yaml
 
 # pre-commit
 .pre-commit-config.yaml
+
+# KiCad: per-user view state and backups
+*.kicad_prl
+*-backups/
+fp-info-cache

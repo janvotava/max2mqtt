@@ -57,6 +57,8 @@ Only widening the receive filter would let the board hear, but the thermostats s
 
 ## For the next PCB revision
 
+Done in v2 (see [README.md](README.md)), except where noted there.
+
 - Route 3V3 and GND to the module as tracks. They currently exist only as copper fills, which pull heat
   away from the iron; those four joints are the hard ones to solder.
 - Use bigger pads on the 2 mm header: a 1.2 mm pad around a 0.81 mm hole leaves a 0.19 mm ring.
