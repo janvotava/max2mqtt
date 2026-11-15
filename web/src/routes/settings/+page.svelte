@@ -242,7 +242,7 @@
 		<div class="grid">
 			<label>
 				{m.radio_address()}
-				<input bind:value={address} required pattern="[0-9A-Fa-f]{6}" maxlength="6" />
+				<input bind:value={address} required pattern={'[0-9A-Fa-f]{6}'} maxlength="6" />
 			</label>
 			<label>
 				{m.freq_correction()}
