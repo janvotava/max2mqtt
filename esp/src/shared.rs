@@ -101,7 +101,7 @@ pub enum SystemCmd {
 /// Handled in order, so "erase, then restart" cannot be reordered.
 pub static SYSTEM: Channel<Raw, SystemCmd, 8> = Channel::new();
 
-/// (unix seconds, monotonic ms) at the last SNTP answer.
+/// (unix ms, monotonic ms) at the last SNTP answer.
 static CLOCK: BlockingMutex<Raw, Cell<Option<(u64, u64)>>> = BlockingMutex::new(Cell::new(None));
 
 /// The bridge's time zone, for the logger (which cannot wait for the bridge).
@@ -114,20 +114,25 @@ pub fn set_log_timezone(tz: max2mqtt_bridge::clock::TimeZone) {
 
 /// Local wall-clock time and milliseconds, once SNTP has answered.
 pub fn local_now() -> Option<(max2mqtt_bridge::clock::LocalTime, u64)> {
-    let (unix, at) = CLOCK.lock(|c| c.get())?;
-    let ms = unix * 1000 + Instant::now().as_millis().saturating_sub(at);
+    let ms = unix_millis()?;
     let tz = LOG_TIMEZONE.lock(|c| c.get());
     Some((max2mqtt_bridge::clock::local_time(ms / 1000, &tz), ms % 1000))
 }
 
-pub fn set_unix_time(unix: u64) {
+/// Unix time in milliseconds, once SNTP has answered.
+pub fn unix_millis() -> Option<u64> {
+    let (unix_ms, at) = CLOCK.lock(|c| c.get())?;
+    Some(unix_ms + Instant::now().as_millis().saturating_sub(at))
+}
+
+pub fn set_unix_millis(unix_ms: u64) {
     let now = Instant::now().as_millis();
-    CLOCK.lock(|c| c.set(Some((unix, now))));
+    CLOCK.lock(|c| c.set(Some((unix_ms, now))));
 }
 
 pub fn ctx() -> Ctx {
     let now = Instant::now().as_millis();
-    let unix_time = CLOCK.lock(|c| c.get()).map(|(unix, at)| unix + now.saturating_sub(at) / 1000);
+    let unix_time = CLOCK.lock(|c| c.get()).map(|(unix_ms, at)| (unix_ms + now.saturating_sub(at)) / 1000);
     Ctx { now, unix_time }
 }
 

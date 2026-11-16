@@ -29,7 +29,9 @@ use esp_radio::wifi::{AuthenticationMethodConfig, Config, ControllerConfig, Inte
 use max2mqtt_bridge::Settings;
 use static_cell::StaticCell;
 
-use crate::shared::{HOTSPOT, Network, SCAN_REQUEST, SCAN_RESULT, STATION, hotspot_idle_secs, set_unix_time};
+use crate::shared::{
+    HOTSPOT, Network, SCAN_REQUEST, SCAN_RESULT, STATION, hotspot_idle_secs, set_unix_millis, unix_millis,
+};
 
 /// Seconds between 1900 (NTP epoch) and 1970 (Unix epoch).
 const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
@@ -270,9 +272,15 @@ async fn sntp_task(stack: Stack<'static>, settings: &'static Settings) {
             announced = ip;
         }
         match sntp_query(stack, &settings.ntp_server).await {
-            Ok(unix) => {
-                set_unix_time(unix);
-                log::info!("Time synced: {unix}");
+            Ok(unix_ms) => {
+                // The log's own timestamps show the time; say that the clock is set, and on each resync how
+                // far it had drifted (positive: our clock was behind). Set first, so the line carries wall time.
+                let before = unix_millis();
+                set_unix_millis(unix_ms);
+                match before {
+                    None => log::info!("Clock set from {}", settings.ntp_server),
+                    Some(before) => log::info!("Clock resynced, drift {} ms", unix_ms as i64 - before as i64),
+                }
                 Timer::after_secs(3600).await;
             }
             Err(e) => {
@@ -283,6 +291,7 @@ async fn sntp_task(stack: Stack<'static>, settings: &'static Settings) {
     }
 }
 
+/// Unix time in milliseconds.
 async fn sntp_query(stack: Stack<'static>, server: &str) -> Result<u64, &'static str> {
     let addresses = stack.dns_query(server, DnsQueryType::A).await.map_err(|_| "DNS lookup failed")?;
     let server = *addresses.first().ok_or("no address for NTP server")?;
@@ -297,19 +306,32 @@ async fn sntp_query(stack: Stack<'static>, server: &str) -> Result<u64, &'static
     let mut request = [0u8; 48];
     request[0] = 0x23; // LI 0, version 4, client mode
     socket.send_to(&request, (server, 123)).await.map_err(|_| "send failed")?;
+    let sent = Instant::now();
 
     let mut reply = [0u8; 48];
     let (n, _) = with_timeout(Duration::from_secs(5), socket.recv_from(&mut reply))
         .await
         .map_err(|_| "no answer")?
         .map_err(|_| "receive failed")?;
+    let round_trip = sent.elapsed().as_millis();
     if n < 48 || reply[0] & 0x07 != 4 {
         return Err("bad reply");
     }
-    let mut secs = u32::from_be_bytes([reply[40], reply[41], reply[42], reply[43]]) as u64;
+    let received = ntp_millis(&reply[32..40])?;
+    let transmitted = ntp_millis(&reply[40..48])?;
+    // Half the time on the wire, not counting how long the server held the request, has passed since it answered.
+    let in_flight = round_trip.saturating_sub(transmitted.saturating_sub(received));
+    Ok(transmitted + in_flight / 2)
+}
+
+/// An NTP timestamp (seconds and a 32-bit fraction since 1900) as Unix milliseconds.
+fn ntp_millis(t: &[u8]) -> Result<u64, &'static str> {
+    let mut secs = u32::from_be_bytes([t[0], t[1], t[2], t[3]]) as u64;
     // NTP era 1 starts in February 2036.
     if secs < 0x8000_0000 {
         secs += 1 << 32;
     }
-    secs.checked_sub(NTP_UNIX_OFFSET).filter(|&t| t > 1_700_000_000).ok_or("implausible time")
+    let fraction = u32::from_be_bytes([t[4], t[5], t[6], t[7]]) as u64;
+    let secs = secs.checked_sub(NTP_UNIX_OFFSET).filter(|&t| t > 1_700_000_000).ok_or("implausible time")?;
+    Ok(secs * 1000 + ((fraction * 1000) >> 32))
 }
