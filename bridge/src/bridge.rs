@@ -33,8 +33,9 @@ use crate::config::{Config, DayProgram, DeviceConfig, HeatingConfig, Pending};
 use crate::heating::{Burner, Demand, boost_active, valve_demand};
 use crate::homeassistant::Discovery;
 use crate::protocol::{
-    DeviceType, FLAG_GROUP, Frame, Message, Mode, Status, TEMPERATURE_MAX, TEMPERATURE_MIN, ThermostatState, Until,
-    WallThermostatState, command, decode_rx, parse, parse_thermostat_state, parse_wall_thermostat_state, payload,
+    DeviceType, FLAG_GROUP, Frame, Message, Mode, Status, TEMPERATURE_MAX, TEMPERATURE_MIN, ThermostatState,
+    TxDescription, Until, WallThermostatState, command, decode_rx, parse, parse_thermostat_state,
+    parse_wall_thermostat_state, payload,
 };
 use crate::schedule::{DaySchedule, parse_time};
 use crate::tx::{Event, Next, Outgoing, TxId, TxQueue};
@@ -463,11 +464,14 @@ impl Bridge {
                 _ => to.map_or_else(String::new, |a| a.to_string()),
             };
             log::info!(
-                "TX {to}: {}{} {}",
-                command::name(bytes.get(3).copied().unwrap_or(0xFF)),
+                "TX {to}{}: {}",
                 if *long_preamble { " (long preamble)" } else { "" },
-                hex(bytes)
+                TxDescription {
+                    command: bytes.get(3).copied().unwrap_or(0xFF),
+                    payload: bytes.get(crate::protocol::HEADER_LEN..).unwrap_or_default(),
+                }
             );
+            log::debug!("TX {to}: {}", hex(bytes));
         }
         next
     }

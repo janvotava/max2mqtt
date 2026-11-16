@@ -215,6 +215,94 @@ impl Status {
 // ----- log text ---------------------------------------------------------------------
 // Readable summaries for the log: what a person debugging radio traffic needs, not every bit.
 
+/// A borrowed command summary, formatted without allocating or copying the frame.
+pub struct TxDescription<'a> {
+    pub command: u8,
+    pub payload: &'a [u8],
+}
+
+impl core::fmt::Display for TxDescription<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use command::*;
+        let p = self.payload;
+        f.write_str(command::name(self.command))?;
+        match (self.command, p) {
+            (TIME_INFORMATION, []) => f.write_str(": asks for the time"),
+            (TIME_INFORMATION, [year, day, hour, minute, second]) => write!(
+                f,
+                ": {:04}-{:02}-{day:02} {hour:02}:{:02}:{:02}",
+                2000 + *year as u16,
+                ((minute >> 4) & 0x0C) | (second >> 6),
+                minute & 0x3F,
+                second & 0x3F
+            ),
+            (SET_TEMPERATURE, [temp, rest @ ..]) if rest.is_empty() || rest.len() == 3 => {
+                write!(f, ": {}, target {} °C", Mode::from_bits(temp >> 6).as_str(), (temp & 0x3F) as f32 / 2.0)?;
+                if let [hi, mid, lo] = rest {
+                    write!(
+                        f,
+                        ", until {:04}-{:02}-{:02} {:02}:{:02}",
+                        2000 + (mid & 0x3F) as u16,
+                        ((hi >> 4) & 0x0E) | (mid >> 7),
+                        hi & 0x1F,
+                        lo / 2,
+                        (lo & 1) * 30
+                    )?;
+                }
+                Ok(())
+            }
+            (CONFIG_TEMPERATURES, [comfort, eco, max, min, offset, window, minutes]) => write!(
+                f,
+                ": comfort {} °C, eco {} °C, min {} °C, max {} °C, offset {} °C, window {} °C for {} min",
+                *comfort as f32 / 2.0,
+                *eco as f32 / 2.0,
+                *min as f32 / 2.0,
+                *max as f32 / 2.0,
+                *offset as f32 / 2.0 - 3.5,
+                *window as f32 / 2.0,
+                *minutes as u16 * 5
+            ),
+            (CONFIG_VALVE, [boost, decalc, max, offset]) => write!(
+                f,
+                ": boost {} min at {} %, decalc {} {:02}:00, max {:.1} %, offset {:.1} %",
+                payload::BOOST_MINUTES[(boost >> 5) as usize],
+                (boost & 0x1F) * 5,
+                Weekday::from_max_index(decalc >> 5).map_or("unknown day", Weekday::name),
+                decalc & 0x1F,
+                *max as f32 * 100.0 / 255.0,
+                *offset as f32 * 100.0 / 255.0
+            ),
+            (ADD_LINK_PARTNER | REMOVE_LINK_PARTNER, [a, b, c, kind]) => write!(
+                f,
+                ": {} ({})",
+                Address([*a, *b, *c]),
+                DeviceType::from_raw(*kind).map_or("unknown device type", DeviceType::as_str)
+            ),
+            (SET_GROUP_ID | REMOVE_GROUP_ID, [group]) => write!(f, ": {group}"),
+            (SET_DISPLAY_ACTUAL_TEMPERATURE, [value]) => {
+                write!(f, ": {} temperature", if value & 0x04 != 0 { "actual" } else { "target" })
+            }
+            (CONFIG_WEEK_PROFILE, [day, points @ ..]) if !points.is_empty() && points.len().is_multiple_of(2) => {
+                write!(
+                    f,
+                    ": {}, part {}",
+                    Weekday::from_max_index(day & 0x0F).map_or("unknown day", Weekday::name),
+                    if day & 0x10 != 0 { 2 } else { 1 }
+                )?;
+                for point in points.as_chunks::<2>().0 {
+                    let value = u16::from_be_bytes([point[0], point[1]]);
+                    let minutes = (value & 0x1FF) * 5;
+                    write!(f, ", {} °C until {:02}:{:02}", (value >> 9) as f32 / 2.0, minutes / 60, minutes % 60)?;
+                }
+                Ok(())
+            }
+            (ACK, [code]) => f.write_str(if code & 0x80 == 0 { ": ok" } else { ": rejected" }),
+            (PAIR_PONG, [0]) | (RESET | WAKE_UP | REMOVE_GROUP_ID, []) => Ok(()),
+            _ => write!(f, ": undecoded payload ({} bytes)", p.len()),
+        }
+    }
+}
+
 impl core::fmt::Display for Status {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(self.mode.as_str())?;
@@ -862,5 +950,45 @@ mod tests {
     fn time_information_payload() {
         let t = LocalTime { year: 2026, month: 11, day: 15, hour: 8, minute: 33, second: 25, weekday: Weekday::Sunday };
         assert_eq!(payload::time_information(&t), vec![26, 15, 8, 33 | (8 << 4), 25 | (3 << 6)]);
+    }
+
+    #[test]
+    fn tx_time_description_decodes_captured_packet() {
+        // Payload from the reported TX frame, including the month split across two bytes.
+        let p = [0x1A, 0x10, 0x11, 0x9A, 0xE9];
+        assert_eq!(
+            TxDescription { command: command::TIME_INFORMATION, payload: &p }.to_string(),
+            "time: 2026-11-16 17:26:41"
+        );
+        for month in 1..=12 {
+            let t =
+                LocalTime { year: 2026, month, day: 16, hour: 17, minute: 59, second: 58, weekday: Weekday::Monday };
+            assert_eq!(
+                TxDescription { command: command::TIME_INFORMATION, payload: &payload::time_information(&t) }
+                    .to_string(),
+                alloc::format!("time: 2026-{month:02}-16 17:59:58")
+            );
+        }
+    }
+
+    #[test]
+    fn tx_temperature_description_includes_temporary_end() {
+        let p = payload::set_temperature(Mode::Temporary, 21.5, Until::parse("2026-11-15 18:30"));
+        assert_eq!(
+            TxDescription { command: command::SET_TEMPERATURE, payload: &p }.to_string(),
+            "set temperature: temporary, target 21.5 °C, until 2026-11-15 18:30"
+        );
+    }
+
+    #[test]
+    fn tx_description_handles_short_and_unknown_payloads() {
+        assert_eq!(
+            TxDescription { command: command::TIME_INFORMATION, payload: &[26, 16] }.to_string(),
+            "time: undecoded payload (2 bytes)"
+        );
+        assert_eq!(
+            TxDescription { command: 0xFF, payload: &[1, 2] }.to_string(),
+            "unknown command: undecoded payload (2 bytes)"
+        );
     }
 }

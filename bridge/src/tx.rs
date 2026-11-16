@@ -282,9 +282,9 @@ impl TxQueue {
                 if head.park_on_fail && head.attempts >= WOKEN_ATTEMPTS {
                     let mut e = self.commands.pop_front().expect("head exists");
                     log::info!(
-                        "{} went back to sleep, command {:#04x} waits for it",
+                        "{} went back to sleep, command {} waits for it",
                         e.out.frame.dst,
-                        e.out.frame.command
+                        command::name(e.out.frame.command)
                     );
                     e.out.long_preamble = true;
                     self.park(e.out);
@@ -293,9 +293,9 @@ impl TxQueue {
                 if head.attempts >= MAX_ATTEMPTS {
                     let e = self.commands.pop_front().expect("head exists");
                     log::warn!(
-                        "No ACK from {} for command {:#04x} after {} attempts",
+                        "No ACK from {} for command {} after {} attempts",
                         e.out.frame.dst,
-                        e.out.frame.command,
+                        command::name(e.out.frame.command),
                         e.attempts
                     );
                     events.push(Event::GaveUp { dst: e.out.frame.dst, command: e.out.frame.command });
@@ -310,8 +310,8 @@ impl TxQueue {
                     // Logged when it goes out, not every time it waits for airtime.
                     if head.attempts > 0 {
                         log::info!(
-                            "Retrying command {:#04x} to {} (attempt {})",
-                            head.out.frame.command,
+                            "Retrying command {} to {} (attempt {})",
+                            command::name(head.out.frame.command),
                             head.out.frame.dst,
                             head.attempts + 1
                         );
