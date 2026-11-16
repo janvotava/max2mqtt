@@ -24,7 +24,8 @@ const MAX_INBOUND: usize = 8 * 1024;
 
 #[embassy_executor::task]
 pub async fn mqtt_task(stack: Stack<'static>, client_id: &'static str, settings: &'static Settings) {
-    let mut rx = alloc::vec![0u8; 2048];
+    // What the broker sends are short commands; what we send are whole device announcements.
+    let mut rx = alloc::vec![0u8; 1024];
     let mut tx = alloc::vec![0u8; 2048];
     loop {
         stack.wait_config_up().await;

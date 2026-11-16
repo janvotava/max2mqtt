@@ -5,7 +5,6 @@
 //! The last [`BUFFER_BYTES`] of log also stay in RAM for the web UI (`GET /api/logs`), so
 //! a board without USB can still be debugged.
 
-use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
@@ -14,45 +13,24 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use critical_section::Mutex;
 use log::{Level, LevelFilter, Log, Metadata, Record};
+use max2mqtt_bridge::logring::{Copied, LogRing};
 
 const BUFFER_BYTES: usize = 8 * 1024;
 
-struct Ring {
-    lines: VecDeque<(u32, String)>,
-    bytes: usize,
-    next: u32,
-}
-
-static RING: Mutex<RefCell<Ring>> = Mutex::new(RefCell::new(Ring { lines: VecDeque::new(), bytes: 0, next: 1 }));
+static RING: Mutex<RefCell<LogRing>> = Mutex::new(RefCell::new(LogRing::new()));
 /// Lines are kept once the heap exists.
 static KEEP: AtomicBool = AtomicBool::new(false);
 
 /// Start keeping lines; call after the heap is set up.
 pub fn keep_lines() {
+    critical_section::with(|cs| RING.borrow_ref_mut(cs).allocate(BUFFER_BYTES));
     KEEP.store(true, Ordering::Relaxed);
 }
 
-/// Lines with a sequence number from `after + 1` on, and the number to ask for next.
-pub fn lines_after(after: u32) -> (Vec<(u32, String)>, u32) {
-    critical_section::with(|cs| {
-        let ring = RING.borrow_ref(cs);
-        let lines = ring.lines.iter().filter(|(n, _)| *n > after).cloned().collect();
-        (lines, ring.next - 1)
-    })
-}
-
-fn keep(line: String) {
-    critical_section::with(|cs| {
-        let mut ring = RING.borrow_ref_mut(cs);
-        let n = ring.next;
-        ring.next = n.wrapping_add(1);
-        ring.bytes += line.len();
-        ring.lines.push_back((n, line));
-        while ring.bytes > BUFFER_BYTES {
-            let Some((_, old)) = ring.lines.pop_front() else { break };
-            ring.bytes -= old.len();
-        }
-    });
+/// Lines with a sequence number from `after + 1` on, as many as fit in `max` bytes: see
+/// [`LogRing::copy_after`].
+pub fn copy_after(after: u32, out: &mut Vec<u8>, max: usize) -> Copied {
+    critical_section::with(|cs| RING.borrow_ref(cs).copy_after(after, out, max))
 }
 
 const LEVEL: LevelFilter = match option_env!("ESP_LOG") {
@@ -128,7 +106,7 @@ impl Log for Logger {
         if KEEP.load(Ordering::Relaxed) {
             let mut line = String::new();
             let _ = write!(line, "{stamp} {:<5} {}", record.level(), record.args());
-            keep(line);
+            critical_section::with(|cs| RING.borrow_ref_mut(cs).push(&line));
         }
     }
 

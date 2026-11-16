@@ -18,7 +18,8 @@
 //! - `POST /api/restart`, `POST /api/factory-reset`.
 //! - `POST /api/radio/calibrate` (`{"run": true|false}`), `GET /api/radio/calibration`:
 //!   measure the CC1101's frequency error from received packets.
-//! - `GET /api/logs?after=<n>`: the log kept in RAM, lines after sequence number `n`.
+//! - `GET /api/logs?after=<n>`: the log kept in RAM, lines after sequence number `n`
+//!   (written piece by piece, like the config).
 //! - `GET /api/crashes`, `POST /api/crashes/clear`: what went wrong before restarts.
 //! - `POST /api/firmware`: an app image (`fw-image`), streamed into the other app slot;
 //!   restarts into it. See [`crate::ota`].
@@ -28,6 +29,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::Ordering;
 
+use embassy_futures::select::{Either, select};
 use embassy_net::Stack;
 use embassy_net::tcp::TcpSocket;
 use embassy_time::{Duration, Instant, Timer, with_timeout};
@@ -59,76 +61,108 @@ pub struct App {
 
 #[embassy_executor::task(pool_size = 6)]
 pub async fn web_task(stack: Stack<'static>, on_hotspot: bool, app: &'static App) {
-    // Requests are small; a firmware upload is streamed through it.
-    let mut rx = alloc::vec![0u8; 1024];
-    let mut tx = alloc::vec![0u8; 2048];
     loop {
-        let mut socket = TcpSocket::new(stack, &mut rx, &mut tx);
-        socket.set_timeout(Some(Duration::from_secs(10)));
-        if socket.accept(80).await.is_err() {
-            continue;
+        // The hotspot is off nearly always: its listeners take their buffers only while it
+        // is on.
+        while on_hotspot && !HOTSPOT.load(Ordering::Relaxed) {
+            Timer::after_secs(1).await;
         }
-        if on_hotspot {
-            hotspot_used();
+        // Requests are small; a firmware upload is streamed through it.
+        let mut rx = alloc::vec![0u8; 1024];
+        let mut tx = alloc::vec![0u8; 2048];
+        while serve(stack, on_hotspot, app, &mut rx, &mut tx).await {}
+    }
+}
+
+/// The hotspot went off: checked once a second.
+async fn hotspot_off() {
+    while HOTSPOT.load(Ordering::Relaxed) {
+        Timer::after_secs(1).await;
+    }
+}
+
+/// Wait for one connection and answer its request. `false` when the hotspot this listens
+/// on went off instead.
+async fn serve(stack: Stack<'static>, on_hotspot: bool, app: &'static App, rx: &mut [u8], tx: &mut [u8]) -> bool {
+    let mut socket = TcpSocket::new(stack, rx, tx);
+    socket.set_timeout(Some(Duration::from_secs(10)));
+    if on_hotspot {
+        match select(socket.accept(80), hotspot_off()).await {
+            Either::First(Ok(())) => hotspot_used(),
+            Either::First(Err(_)) => return true,
+            Either::Second(()) => return false,
         }
-        let mut path = String::new();
-        let (response, after) = match with_timeout(Duration::from_secs(10), read_request(&mut socket)).await {
-            // Written piece by piece as they are produced: built whole first, they took up to
-            // twice their size in memory.
-            Ok(Ok(request))
-                if request.method == "GET"
-                    && (request.path == "/api/config" || request.path == "/api/backup")
-                    && authorized(app, request.authorization.as_deref()) =>
-            {
-                path = request.path.clone();
-                if let Err(e) = stream_config(&mut socket, app, request.path == "/api/backup").await {
-                    log::debug!("HTTP write failed: {e:?}");
-                }
-                (None, None)
+    } else if socket.accept(80).await.is_err() {
+        return true;
+    }
+    let mut path = String::new();
+    let (response, after) = match with_timeout(Duration::from_secs(10), read_request(&mut socket)).await {
+        // Written piece by piece as they are produced: built whole first, they took up to
+        // twice their size in memory.
+        Ok(Ok(request))
+            if request.method == "GET"
+                && (request.path == "/api/config" || request.path == "/api/backup")
+                && authorized(app, request.authorization.as_deref()) =>
+        {
+            path = request.path.clone();
+            if let Err(e) = stream_config(&mut socket, app, request.path == "/api/backup").await {
+                log::debug!("HTTP write failed: {e:?}");
             }
-            Ok(Ok(request)) if request.method == "POST" && request.path == "/api/firmware" => {
-                if !authorized(app, request.authorization.as_deref()) {
-                    Timer::after_millis(500).await;
-                    (Some(Response::error(401, "wrong password")), None)
-                } else {
-                    match ota::receive(&mut socket, &request.body, request.length, app.store).await {
-                        Ok(()) => {
-                            (Some(Response::ok(json!({ "ok": true, "restarting": true }))), Some(SystemCmd::Restart))
-                        }
-                        Err(e) => {
-                            log::warn!("Firmware upload failed: {e}");
-                            (Some(Response::error(400, &e)), None)
-                        }
+            (None, None)
+        }
+        Ok(Ok(request))
+            if request.method == "GET"
+                && request.path == "/api/logs"
+                && authorized(app, request.authorization.as_deref()) =>
+        {
+            path = request.path.clone();
+            let after = request.query.split('&').find_map(|kv| kv.strip_prefix("after=")).and_then(|v| v.parse().ok());
+            if let Err(e) = stream_logs(&mut socket, after.unwrap_or(0)).await {
+                log::debug!("HTTP write failed: {e:?}");
+            }
+            (None, None)
+        }
+        Ok(Ok(request)) if request.method == "POST" && request.path == "/api/firmware" => {
+            if !authorized(app, request.authorization.as_deref()) {
+                Timer::after_millis(500).await;
+                (Some(Response::error(401, "wrong password")), None)
+            } else {
+                match ota::receive(&mut socket, &request.body, request.length, app.store).await {
+                    Ok(()) => (Some(Response::ok(json!({ "ok": true, "restarting": true }))), Some(SystemCmd::Restart)),
+                    Err(e) => {
+                        log::warn!("Firmware upload failed: {e}");
+                        (Some(Response::error(400, &e)), None)
                     }
                 }
             }
-            Ok(Ok(request)) => {
-                path = request.path.clone();
-                let (r, after) = handle(app, on_hotspot, request).await;
-                (Some(r), after)
-            }
-            Ok(Err(status)) => (Some(Response::error(status, "bad request")), None),
-            Err(_) => (Some(Response::error(408, "timeout")), None),
-        };
-        // The request and its response are both in memory here.
-        crate::heap::note(&path);
-        if let Some(response) = response
-            && let Err(e) = response.write(&mut socket).await
-        {
-            log::debug!("HTTP write failed: {e:?}");
         }
-        let _ = socket.flush().await;
-        socket.close();
-        // Let the FIN go out before the socket is dropped (which would reset).
-        let _ = with_timeout(Duration::from_secs(2), async {
-            let mut b = [0u8; 64];
-            while socket.read(&mut b).await.is_ok_and(|n| n > 0) {}
-        })
-        .await;
-        if let Some(cmd) = after {
-            let _ = SYSTEM.try_send(cmd);
+        Ok(Ok(request)) => {
+            path = request.path.clone();
+            let (r, after) = handle(app, on_hotspot, request).await;
+            (Some(r), after)
         }
+        Ok(Err(status)) => (Some(Response::error(status, "bad request")), None),
+        Err(_) => (Some(Response::error(408, "timeout")), None),
+    };
+    // The request and its response are both in memory here.
+    crate::heap::note(&path);
+    if let Some(response) = response
+        && let Err(e) = response.write(&mut socket).await
+    {
+        log::debug!("HTTP write failed: {e:?}");
     }
+    let _ = socket.flush().await;
+    socket.close();
+    // Let the FIN go out before the socket is dropped (which would reset).
+    let _ = with_timeout(Duration::from_secs(2), async {
+        let mut b = [0u8; 64];
+        while socket.read(&mut b).await.is_ok_and(|n| n > 0) {}
+    })
+    .await;
+    if let Some(cmd) = after {
+        let _ = SYSTEM.try_send(cmd);
+    }
+    true
 }
 
 struct Request {
@@ -393,28 +427,6 @@ async fn handle(app: &App, on_hotspot: bool, req: Request) -> (Response, Option<
                 None,
             ))
         }
-        ("GET", "/logs") => {
-            let after = req.query.split('&').find_map(|kv| kv.strip_prefix("after=")).and_then(|v| v.parse().ok());
-            let (lines, last) = crate::logger::lines_after(after.unwrap_or(0));
-            // Straight to text: as a JSON tree, the log took several times its size (it was
-            // the highest heap use of all requests).
-            #[derive(serde::Serialize)]
-            struct Logs {
-                last: u32,
-                lines: Vec<(u32, String)>,
-            }
-            let body = serde_json::to_vec(&Logs { last, lines }).unwrap_or_default();
-            Ok((
-                Response {
-                    status: 200,
-                    content_type: "application/json",
-                    gzip: false,
-                    location: None,
-                    body: Body::Owned(body),
-                },
-                None,
-            ))
-        }
         ("PUT", "/backup") => restore(app, &req.body).await,
         ("POST", "/bridge") => bridge(&req.body).await,
         ("POST", "/restart") => Ok((Response::ok(json!({ "ok": true })), Some(SystemCmd::Restart))),
@@ -533,6 +545,36 @@ async fn stream_config(socket: &mut TcpSocket<'_>, app: &App, backup: bool) -> R
         socket.write_all(b"}").await?;
     }
     Ok(())
+}
+
+/// `GET /api/logs`: `{"lines":[[n,"text"],...],"last":n}`, a kilobyte of log at a time.
+/// Built whole, the answer took three times the log's size next to the log itself: the
+/// highest heap use of all requests. No Content-Length: the connection closes at the end.
+async fn stream_logs(socket: &mut TcpSocket<'_>, mut after: u32) -> Result<(), embassy_net::tcp::Error> {
+    const PIECE: usize = 1024;
+    socket
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{\"lines\":[")
+        .await?;
+    let mut text = Vec::with_capacity(PIECE);
+    let mut json = Vec::with_capacity(PIECE + PIECE / 4);
+    let mut comma = false;
+    let last = loop {
+        let copied = crate::logger::copy_after(after, &mut text, PIECE);
+        if copied.lines == 0 {
+            break copied.last;
+        }
+        json.clear();
+        for (n, line) in (copied.first..).zip(text.split(|&c| c == b'\n')).take(copied.lines as usize) {
+            if comma {
+                json.push(b',');
+            }
+            comma = true;
+            json.extend(serde_json::to_vec(&(n, String::from_utf8_lossy(line))).unwrap_or_default());
+        }
+        socket.write_all(&json).await?;
+        after = copied.first + copied.lines - 1;
+    };
+    socket.write_all(format!("],\"last\":{last}}}").as_bytes()).await
 }
 
 async fn scan() -> Response {

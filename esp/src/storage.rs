@@ -90,7 +90,12 @@ pub struct Store {
     written: BTreeMap<Key, u32>,
     /// The small entries read back at runtime (trial boots, crashes).
     small: BTreeMap<Key, Vec<u8>>,
-    buf: Vec<u8>,
+}
+
+/// Room for one entry while the map reads or writes it. Taken for each operation rather
+/// than kept: flash is touched a few times a day.
+fn scratch() -> Vec<u8> {
+    alloc::vec![0; BUFFER]
 }
 
 fn checksum(data: &[u8]) -> u32 {
@@ -136,14 +141,14 @@ impl Store {
             map: MapStorage::new(Flash(flash), config, Cache::new_uncached()),
             written: BTreeMap::new(),
             small: BTreeMap::new(),
-            buf: alloc::vec![0; BUFFER],
         })
     }
 
     async fn read_all(&mut self) -> Result<BTreeMap<Key, Vec<u8>>, Error> {
         let mut items = BTreeMap::new();
-        let mut iter = self.map.fetch_all_items(&mut self.buf).await?;
-        while let Some((key, value)) = iter.next::<Vec<u8>>(&mut self.buf).await? {
+        let mut buf = scratch();
+        let mut iter = self.map.fetch_all_items(&mut buf).await?;
+        while let Some((key, value)) = iter.next::<Vec<u8>>(&mut buf).await? {
             // Later entries for the same key are newer.
             items.insert(key, value);
         }
@@ -200,7 +205,7 @@ impl Store {
         if value.len() > BUFFER - 64 {
             return Err(Error::BufferTooSmall(value.len()));
         }
-        self.map.store_item(&mut self.buf, &key, &value).await?;
+        self.map.store_item(&mut scratch(), &key, &value).await?;
         self.written.insert(key, sum);
         if kept(&key) {
             self.small.insert(key, value);
@@ -212,7 +217,7 @@ impl Store {
     /// save tries again instead of the item coming back at the next boot.
     async fn remove(&mut self, key: Key) -> Result<(), Error> {
         if self.written.contains_key(&key) {
-            self.map.remove_item(&mut self.buf, &key).await?;
+            self.map.remove_item(&mut scratch(), &key).await?;
             self.written.remove(&key);
         }
         self.small.remove(&key);

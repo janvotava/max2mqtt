@@ -25,7 +25,7 @@ use esp_hal::rng::Rng;
 use esp_radio::wifi::ap::AccessPointConfig;
 use esp_radio::wifi::scan::ScanConfig;
 use esp_radio::wifi::sta::StationConfig;
-use esp_radio::wifi::{AuthenticationMethodConfig, Config, Interface, WifiController};
+use esp_radio::wifi::{AuthenticationMethodConfig, Config, ControllerConfig, Interface, WifiController};
 use max2mqtt_bridge::Settings;
 use static_cell::StaticCell;
 
@@ -50,7 +50,15 @@ pub struct Net {
 
 /// Bring up Wi-Fi and both IP stacks.
 pub fn start(spawner: &Spawner, wifi: esp_hal::peripherals::WIFI<'static>, settings: &'static Settings) -> Net {
-    let controller = WifiController::new(wifi, Default::default()).expect("Wi-Fi controller");
+    // Espressif's "memory saving" buffer numbers instead of esp-radio's defaults (10 static
+    // receive buffers of 1.6 KiB, up to 32 dynamic ones each way): plenty for a web UI and
+    // MQTT, and still tens of Mbit/s.
+    let wifi_config = ControllerConfig::default()
+        .with_static_rx_buf_num(6)
+        .with_dynamic_rx_buf_num(12)
+        .with_dynamic_tx_buf_num(12)
+        .with_rx_ba_win(6);
+    let controller = WifiController::new(wifi, wifi_config).expect("Wi-Fi controller");
     let sta = Interface::station();
     let ap = Interface::access_point();
     let mac = sta.mac_address();

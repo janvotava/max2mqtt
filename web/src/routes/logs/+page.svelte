@@ -8,7 +8,7 @@
 		lines: [number, string][];
 	}
 
-	// The board keeps the last 16 KiB of its log; this page follows it.
+	// The board keeps the last 8 KiB of its log; this page follows it.
 	let lines = $state<[number, string][]>([]);
 	let error = $state('');
 	let follow = $state(true);

@@ -18,6 +18,7 @@ pub mod clock;
 pub mod config;
 pub mod heating;
 pub mod homeassistant;
+pub mod logring;
 pub mod mqtt;
 pub mod protocol;
 pub mod schedule;
