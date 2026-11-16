@@ -69,6 +69,7 @@
 	"badge_battery": "baterie",
 	"badge_unconfirmed": "{n} nepotvrzeno",
 	"badge_unconfirmed_hint": "Nastavení odeslaná, ale zatím nepotvrzená; pošlou se znovu, až se zařízení ozve.",
+	"stale_hint": "Neslyšeno déle než {n} min: kotel tyto hodnoty už nebere v úvahu",
 	"badge_no_answer": "bez odpovědi",
 	"badge_no_answer_hint": "Zařízení nedostalo odpověď od propojeného partnera. Propojte místnost znovu, nebo zkontrolujte partnerovy baterie.",
 	"unknown_type": "Neznámý typ",

@@ -49,7 +49,7 @@
 	{#each rooms as [room, devices] (room)}
 		<div class="card">
 			<h2>{room}</h2>
-			<DeviceTable {devices} />
+			<DeviceTable {devices} staleMinutes={s.bridge.heating.stale_minutes} />
 		</div>
 	{:else}
 		<div class="card">
@@ -62,7 +62,7 @@
 		<details class="card" open={!rooms.size}>
 			<summary><strong>{m.other_devices()}</strong> <span class="muted">{m.other_devices_count({ n: others.length })}</span></summary>
 			<p class="muted">{m.other_devices_hint()}</p>
-			<DeviceTable devices={others} />
+			<DeviceTable devices={others} staleMinutes={s.bridge.heating.stale_minutes} />
 		</details>
 	{/if}
 {/if}

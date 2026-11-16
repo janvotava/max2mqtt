@@ -69,6 +69,7 @@
 	"badge_battery": "battery",
 	"badge_unconfirmed": "{n} unconfirmed",
 	"badge_unconfirmed_hint": "Settings sent but not acknowledged yet; sent again when the device is heard.",
+	"stale_hint": "Not heard for over {n} min: the burner no longer counts these readings",
 	"badge_no_answer": "no answer",
 	"badge_no_answer_hint": "The device got no answer from a link partner. Re-link its room, or check the partner's batteries.",
 	"unknown_type": "Unknown type",

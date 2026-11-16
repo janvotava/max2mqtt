@@ -86,6 +86,10 @@ M = {
         "Settings sent but not acknowledged yet; sent again when the device is heard.",
         "Nastavení odeslaná, ale zatím nepotvrzená; pošlou se znovu, až se zařízení ozve.",
     ),
+    "stale_hint": (
+        "Not heard for over {n} min: the burner no longer counts these readings",
+        "Neslyšeno déle než {n} min: kotel tyto hodnoty už nebere v úvahu",
+    ),
     "badge_no_answer": ("no answer", "bez odpovědi"),
     "badge_no_answer_hint": (
         "The device got no answer from a link partner. Re-link its room, or check the partner's batteries.",
