@@ -153,7 +153,9 @@ Home Assistant. Everything is announced again when Home Assistant publishes `onl
 - **The burner follows the valves.** Each valve already regulates its room, so the most-open valve is the heat
   demand. A 20 minute time-proportional cycle runs the burner for that share of the time, with minimum on and
   off times. Valves open less than 30 % do not count, a valve during its weekly descaling hour is ignored, and a
-  reading older than 10 minutes counts as closed (an open valve reports every couple of minutes by itself).
+  reading older than 10 minutes counts as closed. A valve does not always report by itself, so one silent for
+  8 minutes is sent the time, and its acknowledgement carries its state (asked again every 30 minutes if it does
+  not answer).
 - **Week programs per room.** Saving a program sends it to every thermostat in the room (each runs its own
   program; links do not pass on switch points). A thermostat joining a room takes over the room's program.
 - **Settings are tracked until confirmed.** Every setting a device has not acknowledged is kept (in flash) and

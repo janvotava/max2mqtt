@@ -52,6 +52,8 @@ const RADIO_WATCHDOG: Millis = 5 * MINUTE;
 const TIME_SYNC_INTERVAL: Millis = 60 * MINUTE;
 /// Each hour one sixth of the thermostats gets the time, so each one every 6 hours.
 const TIME_SYNC_SLOTS: usize = 6;
+/// A radiator valve that has not answered being asked is asked again after this.
+const ASK_AGAIN: Millis = 30 * MINUTE;
 /// Pairing switches itself off after this, so a stranger's device in pairing mode later
 /// is not taken over.
 pub const PAIRING_WINDOW: Millis = 5 * MINUTE;
@@ -123,6 +125,8 @@ pub struct Runtime {
     resent_at: Option<Millis>,
     /// `heating` as last published, to publish again when it changes.
     heating_sent: Option<bool>,
+    /// When the device was last sent the time to get its state in the ACK (`ask_silent_valve`).
+    asked_at: Option<Millis>,
     /// Stale partners this device has been told to drop since the bridge started.
     dropped_links: BTreeSet<Address>,
     /// The device was sent its group again after using another one, since start.
@@ -1644,6 +1648,9 @@ impl Bridge {
             self.last_time_sync = now;
             self.sync_time_slot(&clock);
         }
+        if let Some(clock) = self.local(ctx) {
+            self.ask_silent_valve(&clock, now);
+        }
 
         if now.saturating_sub(self.last_rx) >= RADIO_WATCHDOG {
             log::warn!("Nothing received for 5 minutes, re-initialising the radio");
@@ -1679,6 +1686,33 @@ impl Bridge {
             }
         }
         out
+    }
+
+    /// A radiator valve does not always report by itself (one 21 % open was silent for an
+    /// hour), and a reading older than `stale_minutes` stops counting for the burner. Before
+    /// that happens, send the valve the time: harmless, and its ACK carries its state. A valve
+    /// that reports by itself is never asked. One that does not answer is asked again after
+    /// `ASK_AGAIN`, not on every tick. One valve per tick.
+    fn ask_silent_valve(&mut self, clock: &LocalTime, now: Millis) {
+        let stale = self.settings.heating.stale_minutes as Millis * MINUTE;
+        let ask_after = stale * 4 / 5;
+        let found = self.devices.iter().position(|d| {
+            // Not heard since start counts from start, so a restart gets the valves' state.
+            let heard = d.rt.valve.map_or(0, |v| v.at);
+            d.is_heater()
+                && d.cfg.room.is_some()
+                && now.saturating_sub(heard) >= ask_after
+                && d.rt.asked_at.is_none_or(|t| t < heard || now.saturating_sub(t) >= ASK_AGAIN)
+                && !self.tx.has_for(d.cfg.address)
+        });
+        if let Some(i) = found {
+            let d = &mut self.devices[i];
+            let silent = now.saturating_sub(d.rt.valve.map_or(0, |v| v.at)) / 1000;
+            log::info!("Sending {} the time to get its state, silent for {silent} s", d.cfg.name);
+            d.rt.asked_at = Some(now);
+            let addr = d.cfg.address;
+            self.send_time(addr, clock);
+        }
     }
 
     fn sync_time_slot(&mut self, clock: &LocalTime) {
@@ -1723,11 +1757,10 @@ impl Bridge {
             let decalc = clock
                 .as_ref()
                 .is_some_and(|c| c.weekday == d.cfg.valve.decalc_day && c.hour == d.cfg.valve.decalc_hour);
-            // No polling needed: an open valve reports its state every ~2 minutes by
-            // itself (seen on a valve without a wall thermostat), so its reading stays fresh;
-            // a closed one reports when it opens. A reading older than `stale_minutes` is
-            // ignored, which counts as 0 %, the same as a closed valve: a valve that went
-            // silent (flat battery, out of range) cannot keep the burner going.
+            // A valve gone silent is asked for its state before its reading expires
+            // (`ask_silent_valve`). A reading older than `stale_minutes` is ignored, which
+            // counts as 0 %, the same as a closed valve: a valve that does not answer either
+            // (flat battery, out of range) cannot keep the burner going.
             if let Some(v) = d.rt.valve.filter(|v| fresh(v.at))
                 && !decalc
             {
@@ -2753,6 +2786,52 @@ mod tests {
             }
         }
         assert_eq!(synced, [WT, HT].into_iter().collect());
+    }
+
+    #[test]
+    fn silent_valve_is_asked_for_its_state_before_it_goes_stale() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        drain(&mut b, 0);
+        let asked = |b: &mut Bridge, now: Millis| {
+            b.last_rx = now;
+            b.tick(ctx(now));
+            drain(b, now).iter().filter(|f| f.command == command::TIME_INFORMATION && f.dst == HT).count()
+        };
+        // Reporting by itself: never asked.
+        for m in 1..=7 {
+            assert_eq!(asked(&mut b, m * MINUTE), 0);
+            b.handle_radio(
+                &rx(HT, ME, m as u8 + 1, command::THERMOSTAT_STATE, vec![0x01, 50, 42, 0, 200]),
+                ctx(m * MINUTE),
+            );
+        }
+        // Silent for 8 of the 10 minutes: asked once, and the ACK keeps the reading fresh.
+        let last = 7 * MINUTE;
+        assert_eq!(asked(&mut b, last + 8 * MINUTE - 1_000), 0);
+        assert_eq!(asked(&mut b, last + 8 * MINUTE), 1);
+        assert_eq!(asked(&mut b, last + 8 * MINUTE + 1_000), 0, "not again while waiting");
+        b.handle_radio(&rx(HT, ME, 20, command::ACK, vec![0x01, 0x01, 30, 42]), ctx(last + 8 * MINUTE + 2_000));
+        let answered = last + 8 * MINUTE + 2_000;
+        assert_eq!(b.demand(ctx(answered + 9 * MINUTE)).output, valve_demand(&b.settings.heating, 30));
+        // Silent again: asked again. No answer: asked again only after ASK_AGAIN.
+        let second = answered + 8 * MINUTE;
+        assert_eq!(asked(&mut b, second), 1);
+        assert_eq!(asked(&mut b, second + ASK_AGAIN - 1_000), 0);
+        assert_eq!(asked(&mut b, second + ASK_AGAIN), 1);
+    }
+
+    #[test]
+    fn valves_not_heard_since_start_are_asked() {
+        let mut b = bridge();
+        living_room(&mut b, 0);
+        b.devices.iter_mut().for_each(|d| d.rt = Runtime::default());
+        drain(&mut b, 0);
+        b.last_rx = 8 * MINUTE;
+        b.tick(ctx(8 * MINUTE));
+        let sent = drain(&mut b, 8 * MINUTE);
+        assert!(sent.iter().any(|f| f.command == command::TIME_INFORMATION && f.dst == HT), "{sent:?}");
+        assert!(!sent.iter().any(|f| f.dst == WT), "only radiator valves are asked");
     }
 
     #[test]
