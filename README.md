@@ -3,6 +3,8 @@
 Replaces the eQ-3 MAX! Cube: an ESP32 with a CC1101 runs your MAX! thermostats, fires the gas furnace when a room
 needs heat, and talks to Home Assistant over MQTT. Everything is set up in its web UI.
 
+![Web UI: furnace, bridge status and the rooms with their thermostats](docs/screenshot.png)
+
 Runs on D1-mini-sized ESP32 boards (HW-665 / ESP32-WROOM-32, Lolin C3 Mini) with a CC1101 shield
 ([`hardware/cc1101-shield`](hardware/cc1101-shield)) and a relay shield that switches the furnace.
 
