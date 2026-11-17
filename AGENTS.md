@@ -15,7 +15,7 @@ restart drops the burner until the valves report again (a minute or two).
 ## Version control
 
 This is a colocated Jujutsu repository: use `jj` (`jj st`, `jj diff`, `jj log`, `jj describe`), not git. Nothing
-needs staging.
+needs staging. Commit messages carry no `Co-Authored-By` or other attribution trailers.
 
 ## Commands
 
